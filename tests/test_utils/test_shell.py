@@ -21,6 +21,12 @@ def test_resolve_shell_command_prefers_bash_on_linux(monkeypatch):
 
 
 def test_resolve_shell_command_uses_powershell_on_windows(monkeypatch):
+    # Git Bash 还会经文件系统候选路径兜底解析（ProgramFiles 等，不走
+    # shutil.which），测试"无 bash 时回退 PowerShell"必须整体隔离该函数
+    monkeypatch.setattr(
+        "illusion_forge.utils.shell._resolve_windows_bash", lambda: None
+    )
+
     def fake_which(name: str) -> str | None:
         mapping = {
             "pwsh": "C:/Program Files/PowerShell/7/pwsh.exe",
@@ -41,6 +47,12 @@ def test_resolve_shell_command_uses_powershell_on_windows(monkeypatch):
 
 
 def test_resolve_shell_command_ignores_windows_bash_shim(monkeypatch):
+    # 同上：隔离文件系统兜底解析，确保 shim 排除逻辑（而非 runner 上的
+    # 真实 Git Bash）决定测试结果
+    monkeypatch.setattr(
+        "illusion_forge.utils.shell._resolve_windows_bash", lambda: None
+    )
+
     def fake_which(name: str) -> str | None:
         mapping = {
             "bash": r"C:\Windows\System32\bash.exe",

@@ -223,9 +223,15 @@ def test_delete_active_lazy_empty_session_creates_replacement() -> None:
     request.session_ids = ["s-active"]
     request.delete_all = False
     request.cwd = None
+    request.client_token = None  # BackendEvent 契约：client_token 须为 str | None
 
-    # _delete_session_by_id 返回 False：模拟惰性空会话（目录不存在）
-    with patch("illusion_forge.ui.web.ws_web_api._delete_session_by_id", return_value=False),          patch("illusion_forge.ui.web.ws_web_api._cleanup_file_history"):
+    # delete_session_by_id 返回 False：模拟惰性空会话（目录不存在）。
+    # 补位判定走 SessionLifecycleService，须 patch 其命名空间中的符号
+    # （ws_web_api._delete_session_by_id 是另一别名，对本路径无效）
+    with patch(
+        "illusion_forge.ui.web.session_lifecycle.delete_session_by_id",
+        return_value=False,
+    ), patch("illusion_forge.ui.web.ws_web_api._cleanup_file_history"):
         asyncio.run(dispatcher.handle(request))
 
     # 断言补位会话已激活并推送了 web_session_ready（删除补位的专用事件）

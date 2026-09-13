@@ -30,9 +30,11 @@ class MacOSSandboxPlatform(SandboxPlatform):
         log_tag = f"illusion_sandbox_{os.getpid()}"
         profile = self._generate_seatbelt_profile(config, log_tag)
 
-        # 写入临时 profile 文件
+        # 写入临时 profile 文件（profile 含中文注释，必须显式 UTF-8，
+        # 否则 Windows 默认 locale 编码（cp1252/GBK）写入时可能 UnicodeEncodeError）
         with tempfile.NamedTemporaryFile(
-            mode="w", prefix="illusion-seatbelt-", suffix=".sb", delete=False
+            mode="w", encoding="utf-8", prefix="illusion-seatbelt-",
+            suffix=".sb", delete=False
         ) as profile_file:
             profile_file.write(profile)
 
