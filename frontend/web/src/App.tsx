@@ -1,0 +1,1550 @@
+/**
+ * @fileoverview Web 前端应用主组件
+ *
+ * 本模块是 IllusionForge Web 前端的核心入口，负责：
+ * 1. 整体应用布局与组件组合
+ * 2. WebSocket 会话管理
+ * 3. 处理用户提交的命令
+ * 4. 管理侧边栏和右侧面板的折叠/展开状态
+ * 5. Toast 通知显示
+ * 6. 删除会话弹窗
+ * 7. 权限和问答模态框响应
+ *
+ * @module App
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { normalizeLanguage, t, type UiLanguage } from './i18n';
+import { settingsApi } from './api';
+import { useWebSocketSession } from './hooks/useWebSocketSession';
+import { useTheme } from './hooks/useTheme';
+import Sidebar, { SidebarControls } from './components/Sidebar';
+import ChatArea from './components/ChatArea';
+import { WorkbenchView } from './components/WorkbenchView';
+import { buildAddNoteDoc } from './components/canvas/CanvasWorkbench';
+import PromptInput, { type PromptInputHandle } from './components/PromptInput';
+import Toolbar from './components/Toolbar';
+import RightPanel, { RightPanelControls } from './components/RightPanel';
+import TitleBar from './components/TitleBar';
+import ConnectingOverlay from './components/ConnectingOverlay';
+import ImagePreview from './components/ImagePreview';
+import FileViewerModal from './components/FileViewerModal';
+import FilePreviewPanel from './components/FilePreviewPanel';
+import { CustomInputModal } from './components/CustomInputModal';
+import { SetupForm } from './components/SetupForm';
+import { GoalBar } from './components/GoalBar';
+import { ToastMarkdown } from './components/ToastMarkdown';
+import type { GoalStatus } from './types/protocol';
+import { isAppSupervised, notificationNeedsPriming, notifyDesktop, playToastSound, primeNotificationPermission, type NotifyLevel } from './utils/notify';
+import { authQueryString } from './utils/launchToken';
+import { FolderClosedIcon, FolderOpenIcon } from './components/icons';
+
+/** WebSocket 连接地址（附带 launch token：启动时 URL 携带，后续靠
+ *  sessionStorage 恢复 / 后端签名 cookie 兜底） */
+const WS_URL = (() => {
+  const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  const base = `${scheme}://${window.location.host}/ws`;
+  const tokenQuery = authQueryString();
+  return tokenQuery ? `${base}${tokenQuery}` : base;
+})();
+
+/** Toast 通知显示时长（毫秒） */
+const TOAST_DURATION = 5000;
+
+/**
+ * 去掉命令反馈中的 Usage 用法提示段
+ *
+ * Usage 是斜杠命令的终端语法教学（后端 registry 统一追加，或处理器自带），
+ * 对 terminal 有意义；Web/Desktop 的 toast 只关心执行结果本身。命中
+ * 「行首 Usage:/用法:」即整段截断——若全文就是用法提示则返回空串，
+ * 由调用方直接吞掉这次 toast。
+ */
+function stripUsageHint(text: string): string {
+  const idx = text.search(/(?:^|\n)\s*(?:Usage|用法|使用方法)\s*[:：]/i);
+  if (idx === -1) return text;
+  return text.slice(0, idx).trim();
+}
+
+/** B 通道允许的指令集合（前端识别并走 web_query） */
+const B_COMMANDS = ['compact', 'export', 'init', 'rename'];
+// 阻塞会话的指令（busy 中不可用，通过 toast 提示）；余下 B 类指令为非阻塞，不改变 busy 状态
+const BLOCKING_COMMANDS = new Set(['compact']);
+/** /goal 的瞬时子命令：不驱动轮次，不进入 busy（resume 除外——它 rearm 并立即续跑） */
+const GOAL_INSTANT_SUBCOMMANDS = new Set(['clear', 'pause', 'edit']);
+
+/** 右栏（区块栏）最小宽度 */
+const MIN_RIGHT_PANEL = 260;
+/** 文件预览列最小宽度 */
+const MIN_PREVIEW_PANEL = 280;
+
+/**
+ * 应用主组件
+ *
+ * Web 前端的根组件，负责组合所有子组件并管理全局状态。
+ *
+ * @returns 返回应用的 JSX 元素
+ */
+export default function App() {
+  const session = useWebSocketSession(WS_URL);
+
+  // 在 App 顶层应用主题（dark class 写到 <html>）。
+  // 主界面在遮罩褪去前不渲染，若只靠子组件的 useTheme 挂载来应用主题，
+  // 深色模式会在遮罩褪去前从未生效，导致主界面以浅色呈现。
+  useTheme();
+
+  // 全局禁止鼠标点击按钮时的默认聚焦（capture 阶段）。
+  // 浏览器原生行为：鼠标点击过的 <button> 会保留 DOM 焦点，此后按 Enter
+  // 会经原生 click 再次触发该按钮——表现为"变更卡片点开后按 Enter 反而
+  // 折叠""弹窗按钮被回车误触"等一系列回车误绑定。preventDefault 后鼠标
+  // 点击不再转移焦点，Enter 始终作用于真实焦点处（如输入框）；键盘 Tab
+  // 导航聚焦不受影响，click 事件照常派发。
+  // 组件内已有的局部 onMouseDown preventDefault（MessageActions /
+  // ModalCard / GlassDropdown）与本规则重复，保留作纵深防御。
+  useEffect(() => {
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest('button')) e.preventDefault();
+    };
+    document.addEventListener('mousedown', onMouseDown, true);
+    return () => document.removeEventListener('mousedown', onMouseDown, true);
+  }, []);
+
+  // 遮罩褪去时机：首个会话内容（web_restore_completed）呈现完成即褪去。
+  // 桌面端窗口启动即最大化（见 desktop createWindow maximized:true），
+  // 无需在此触发 maximize 或等待全屏时机。
+  const [revealReady, setRevealReady] = useState(false);
+  useEffect(() => {
+    if (session.connected && !session.bootstrapping) {
+      setRevealReady(true);
+    }
+  }, [session.connected, session.bootstrapping]);
+
+  // 遮罩淡出：两段式——先保持不透明（主界面重组件在同 commit 挂载，双
+  // rAF + 90ms 空闲拍等长尾冲刷），再启动 700ms ease-out 过渡；过渡自然
+  // 结束经 onFaded 回调在此卸载，另有兜底定时器防 transitionEnd 丢失
+  // （后台节流 / reduced-motion）。淡出期间放行下层交互，结束后再卸载。
+  const overlayVisible = !session.connected || session.bootstrapping || !revealReady;
+  const [overlayMounted, setOverlayMounted] = useState(overlayVisible);
+  const [overlayFading, setOverlayFading] = useState(false);
+  const handleOverlayFaded = useCallback(() => setOverlayMounted(false), []);
+  // 遮罩错误「重新连接」：整页重载（WebSocket 会话重建；token 来自
+  // sessionStorage / URL，cookie 由后端自动携带）
+  const handleOverlayRetry = useCallback(() => window.location.reload(), []);
+  useEffect(() => {
+    if (overlayVisible) {
+      setOverlayMounted(true);
+      setOverlayFading(false);
+      return;
+    }
+    if (!overlayMounted) return;
+    // 两段式淡出：本 effect 触发时主界面正与遮罩在同一个 React commit 里
+    // 完成首次大规模挂载（revealReady 门控翻转）——若同帧启动 opacity 过渡，
+    // 过渡前几帧会被挂载长任务挤掉，表现为起步卡顿。故先保持遮罩完全不
+    // 透明（重挂载被盖在背后，卡顿不可见），双 rAF 确认该帧绘制完成、主
+    // 线程空闲后再启动过渡；此后 opacity 走合成器，稳定顺滑。
+    //
+    // 兜底截止（deadline）：桌面壳窗口被遮挡/最小化时 Chromium 会暂停后台
+    // 页面的 requestAnimationFrame（background throttling），双 rAF 链可能
+    // 永远不落地，白色遮罩将冻结在打开的设置表单上方——首次登录场景下表单
+    // 藏于遮罩之后，应用表现为"始终卡在遮罩层"。deadline 用 setTimeout 推进
+    // （后台仅是节流到秒级、仍会触发），保证遮罩必然进入淡出状态；rAF 链
+    // 正常落地时先取消 deadline，保留原有的帧对齐收益。
+    let raf1 = 0;
+    let raf2 = 0;
+    let beat = 0;
+    const deadline = window.setTimeout(() => {
+      // 后台节流下 rAF 链永不落地：取消链上还挂着的回调，避免恢复可见性后
+      // 再执行一次重复的（幂等）fade 推进；随后直接置 fading 启动淡出
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+      clearTimeout(beat);
+      setOverlayFading(true);
+    }, 650);
+    raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        // 再让出一拍（~90ms）：挂载后紧跟的增量布局/字体/图片解码等
+        // 长尾工作在遮罩仍不透明时冲刷完毕，过渡启动时主线程真正空闲
+        clearTimeout(deadline);
+        beat = window.setTimeout(() => setOverlayFading(true), 90);
+      });
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+      clearTimeout(deadline);
+      clearTimeout(beat);
+    };
+  }, [overlayVisible, overlayMounted]);
+  // 兜底卸载：正常由 onTransitionEnd 触发；900ms 覆盖 700ms 过渡 + 余量，
+  // 防过渡事件丢失（后台节流 / reduced-motion 场景）
+  useEffect(() => {
+    if (!overlayFading) return;
+    const timer = setTimeout(() => setOverlayMounted(false), 900);
+    return () => clearTimeout(timer);
+  }, [overlayFading]);
+  const lang: UiLanguage = useMemo(
+    () => normalizeLanguage(session.status?.ui_language),
+    [session.status?.ui_language],
+  );
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // CAD 画布工作台布局切换（chat 对话流 ⇄ canvas 画布）。
+  // 用户选择记忆在 localStorage；无本地记忆时回退 settings.workbench.default_view
+  const [viewMode, setViewMode] = useState<'chat' | 'canvas'>(() =>
+    localStorage.getItem('illusion.viewMode') === 'canvas' ? 'canvas' : 'chat',
+  );
+  const handleSetViewMode = useCallback((mode: 'chat' | 'canvas') => {
+    setViewMode(mode);
+    try { localStorage.setItem('illusion.viewMode', mode); } catch { /* 隐私模式等存储不可用场景静默 */ }
+  }, []);
+  // 首次使用（无本地记忆）时读取设置里的默认视图
+  useEffect(() => {
+    if (localStorage.getItem('illusion.viewMode')) return;
+    settingsApi.get().then((s) => {
+      if ((s as { workbench?: { default_view?: string } }).workbench?.default_view === 'canvas') {
+        setViewMode('canvas');
+      }
+    }).catch(() => { /* 设置读取失败保持 chat 默认 */ });
+  }, []);
+  // 输入框与工具栏展开的唯一下拉标识（plus/ws/mode/model/effort），null 表示全部收起；
+  // 提升到 App 统一管理，保证点击其中一个时自动收起其他下拉
+  const [activeMenu, setActiveMenu] = useState<string | null>(null);
+  // 右栏默认折叠；折叠态下右栏整体隐藏，控制由顶部右侧按钮组（RightPanelControls）承载
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(true);
+  // 左栏宽度固定（不允许拖动调整宽度），仅保留折叠/展开能力
+  const sidebarWidth = 280;
+  const [rightPanelWidth, setRightPanelWidth] = useState(260);
+  // 文件预览停靠列宽与弹窗形态：默认停靠右栏右侧，可"弹窗查看"放大。
+  // 初始宽度受右栏整体 ≤ 2/5 屏上限约束（窄窗口下收敛，避免拖拽级联在
+  // 触底边界处产生跳变）
+  const [previewPanelWidth, setPreviewPanelWidth] = useState(() =>
+    Math.max(280, Math.min(420, Math.floor(window.innerWidth * 0.4) - 261)),
+  );
+  const [previewPopOut, setPreviewPopOut] = useState(false);
+  const dragRef = useRef<{ side: 'right' | 'preview'; startX: number; startW: number } | null>(null);
+  // 预览自动扩宽的防重入标记：记录已处理过的预览键（kind|path），
+  // 同一预览对象反复刷新（加载中→内容）时只扩宽一次
+  const autoWidenKeyRef = useRef<string | null>(null);
+  // 用户是否已手动调整过右栏：点开/折叠区块栏、拖动各栏宽度时置位。
+  // 置位后文件预览不再自动折叠区块栏或调整预览列宽度，尊重用户的自定义设置
+  const userAdjustedPanelsRef = useRef(false);
+
+  // 内联选项状态：由 hook 按会话维护（session.inlineOptions / session.setInlineOptions），
+  // 切换会话时选项随会话隔离，互不串扰
+
+  // 自定义文本输入模态框状态（现仅由 /rename 触发）
+  const [customInputModal, setCustomInputModal] = useState<{
+    prompt: string;
+    command: 'rename';
+    invalidMessage?: string;
+    targetSessionId?: string;
+  } | null>(null);
+
+  // 回退确认弹窗状态
+  const [rewindConfirm, setRewindConfirm] = useState<{ turns: number } | null>(null);
+  // 重新生成：存储待重发的 user 消息文本，rewind 完成后自动重发
+  const pendingRegenerateRef = useRef<string | null>(null);
+  const prevBusyRef = useRef(false);
+  const promptInputRef = useRef<PromptInputHandle>(null);
+  // rewind 回退到开头时欢迎界面重新挂载 PromptInput，用 state 持久化回退文本
+  const [rewindDraft, setRewindDraft] = useState<string | null>(null);
+
+  // Toast 状态
+  const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [toastExiting, setToastExiting] = useState(false);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toastHoverRef = useRef(false);
+  const toastKeyRef = useRef(0);
+
+  const closeToast = useCallback(() => {
+    setToastExiting(true);
+    setTimeout(() => { setToastMessage(null); setToastExiting(false); }, 200);
+  }, []);
+
+  const showToast = useCallback((text: string, type: string, sound = false) => {
+    if (sound) playToastSound(type as NotifyLevel);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastKeyRef.current += 1;
+    setToastExiting(false);
+    setToastMessage({ text, type: type as 'success' | 'error' | 'info' });
+    toastHoverRef.current = false;
+    toastTimerRef.current = setTimeout(() => {
+      if (!toastHoverRef.current) { closeToast(); }
+      toastTimerRef.current = null;
+    }, TOAST_DURATION);
+  }, [closeToast]);
+
+  const handleToastMouseEnter = useCallback(() => {
+    toastHoverRef.current = true;
+    if (toastTimerRef.current) { clearTimeout(toastTimerRef.current); toastTimerRef.current = null; }
+  }, []);
+
+  const handleToastMouseLeave = useCallback(() => {
+    toastHoverRef.current = false;
+    toastTimerRef.current = setTimeout(() => { closeToast(); toastTimerRef.current = null; }, TOAST_DURATION);
+  }, [closeToast]);
+
+  /**
+   * 注册回调函数
+   *
+   * 将内联选项请求和指令结果回调注册到会话中。
+   */
+  useEffect(() => {
+    // 注：select_request 内联选项已由 hook 按会话路由（session.inlineOptions），
+    // 无需在此注册 onSelectRequest 回调
+    session.setOnRewindRestored((text) => {
+      // 持久化回退文本：回退到欢迎界面时输入框重挂载，靠 initialDraft 兜底回填；
+      // 普通 rewind 时 ref 即时回填（两者不冲突）
+      setRewindDraft(text);
+      promptInputRef.current?.setDraft(text);
+    });
+    session.setOnCommandResult((text, type) => {
+      // Usage 用法提示是终端专属信息，web/desktop 的 toast 不展示；
+      // 历史来源可能带 "error:" 字面前缀，统一剥掉由红色样式表达错误语义
+      const clean = stripUsageHint(text).replace(/^error:\s*/i, '');
+      if (clean) showToast(clean, type);
+    });
+    // 版本更新提醒：连接建立后后端异步检查，有新版本时弹 toast
+    session.setOnUpdateAvailable((version) => {
+      showToast(t(lang, 'update_available').replace('{version}', version), 'info');
+    });
+    // toast 通知（任务完成/终止、询问、权限）：后端已按 settings.json 的
+    // notifications 开关过滤并本地化文案，这里只做呈现决策——
+    //   1. 用户正在监管界面（可见且聚焦）时静默丢弃：界面内的运行状态与
+    //      待确认模态框用户直接可见；
+    //   2. 其余状态一律只走系统级通知（桌面壳为 Electron 系统通知，浏览器
+    //      为 Web Notification）+ 提示音，应用内不再有对应卡片——避免同
+    //      一事件"系统横幅 + 应用内 toast"双重打扰。
+    session.setOnToast((payload) => {
+      if (isAppSupervised()) return;
+      notifyDesktop(payload.title || 'Illusion Forge', payload.body);
+      if (payload.play_sound) playToastSound(payload.level);
+    });
+    return () => {
+      session.setOnSelectRequest(null);
+      session.setOnRewindRestored(null);
+      session.setOnCommandResult(null);
+      session.setOnUpdateAvailable(null);
+      session.setOnToast(null);
+    };
+  }, [session.setOnSelectRequest, session.setOnCommandResult, session.setOnUpdateAvailable, session.setOnToast, showToast, lang]);
+
+  // 浏览器模式下的通知权限预申请：Chromium 拦截后台/无手势的
+  // requestPermission，若等页面隐藏后透传时才申请会被静默拒绝。
+  // 借首次点击/按键手势申请一次；拿到结果（granted/denied）后自动摘除监听。
+  useEffect(() => {
+    if (!notificationNeedsPriming()) return;
+    const maybePrime = () => {
+      primeNotificationPermission();
+      if (!notificationNeedsPriming()) {
+        document.removeEventListener('pointerdown', maybePrime, true);
+        document.removeEventListener('keydown', maybePrime, true);
+      }
+    };
+    document.addEventListener('pointerdown', maybePrime, true);
+    document.addEventListener('keydown', maybePrime, true);
+    return () => {
+      document.removeEventListener('pointerdown', maybePrime, true);
+      document.removeEventListener('keydown', maybePrime, true);
+    };
+  }, []);
+
+  /**
+   * 处理面板大小调整开始
+   *
+   * 右栏两条分隔条共用"触底级联"语义（任一侧触达最小宽度后不再卡住，
+   * 继续同向拖动 → 整个右栏整体联动缩放，聊天区同步让位/收窄）：
+   * - right：聊天区|右栏（向右拖右栏区块变窄）；上限约束的是右栏整体
+   *   （右栏 + 预览列）宽度 ≤ 2/5 屏；区块触底后继续右拖 → 预览列同步
+   *   收缩、整个右栏缩小
+   * - preview：右栏|预览列（等总量再分配——向右拖右栏变宽、预览列等量
+   *   变窄）；预览列触底后继续右拖 → 整个右栏缩小（区块收缩、聊天区变宽）；
+   *   区块触底后继续左拖 → 整个右栏增大（预览列继续变宽），镜像对称
+   *
+   * @param side - 要调整的面板（'right' 右栏 / 'preview' 预览列）
+   * @param e - 鼠标事件
+   */
+  const handleResizeStart = useCallback((side: 'right' | 'preview', e: React.MouseEvent) => {
+    e.preventDefault();
+    // 用户主动拖动分隔条调整各栏宽度：标记为已自定义，后续文件预览不再自动调整
+    userAdjustedPanelsRef.current = true;
+    const startW = side === 'right' ? rightPanelWidth : previewPanelWidth;
+    // 拖拽起点快照（preview 再分配需要两侧初始值）
+    const startRight = rightPanelWidth;
+    const startPreview = previewPanelWidth;
+    // 区块/预览列最小宽度保护
+    const MIN_RIGHT = MIN_RIGHT_PANEL;
+    const MIN_PREVIEW = MIN_PREVIEW_PANEL;
+    // 右栏整体（右栏 + 可见预览列）宽度上限：2/5 屏
+    const maxTotal = Math.floor(window.innerWidth * 0.4);
+    const previewVisibleWidth = session.filePreview && !previewPopOut ? previewPanelWidth : 0;
+    const maxRightPanel = Math.max(MIN_RIGHT, maxTotal - previewVisibleWidth);
+    dragRef.current = { side, startX: e.clientX, startW };
+    const onMove = (ev: MouseEvent) => {
+      if (!dragRef.current) return;
+      const dx = ev.clientX - dragRef.current.startX;
+      if (dragRef.current.side === 'right') {
+        const newRight = dragRef.current.startW - dx;
+        if (newRight < MIN_RIGHT) {
+          // 区块触底：继续右拖 → 预览列同步收缩、整个右栏缩小（聊天区变宽）
+          setRightPanelWidth(MIN_RIGHT);
+          setPreviewPanelWidth(Math.max(MIN_PREVIEW, previewPanelWidth - (MIN_RIGHT - newRight)));
+        } else {
+          setRightPanelWidth(Math.min(maxRightPanel, newRight));
+        }
+      } else {
+        if (rightPanelCollapsed) {
+          // 右栏折叠时预览列紧邻聊天区：拖动分隔条直接调整预览列宽（向右拖变窄）
+          setPreviewPanelWidth(Math.min(maxTotal, Math.max(MIN_PREVIEW, dragRef.current.startW - dx)));
+          return;
+        }
+        // 预览分隔条：右栏与预览列等量再分配（总量不变）；任一侧触底后
+        // 继续同向拖动 → 整个右栏联动（预览触底=缩小、区块触底=增大）
+        const total = startRight + startPreview;
+        const raw = startRight + dx;         // 向右拖 → 区块变宽、预览变窄
+        const maxRight = total - MIN_PREVIEW; // 预览列最小保护下的区块上限
+        if (raw > maxRight) {
+          // 预览列触底：超出部分转为整体右栏缩小（区块收缩、预览保持最小）
+          setRightPanelWidth(Math.max(MIN_RIGHT, maxRight - (raw - maxRight)));
+          setPreviewPanelWidth(MIN_PREVIEW);
+        } else if (raw < MIN_RIGHT) {
+          // 区块触底：整体右栏增大（区块保持最小、预览继续变宽；受 3/5 屏上限
+          // 与预览列最小宽度双重约束，保证触底边界处宽度连续）
+          setRightPanelWidth(MIN_RIGHT);
+          setPreviewPanelWidth(Math.max(MIN_PREVIEW, Math.min(total - raw, maxTotal - MIN_RIGHT)));
+        } else {
+          setRightPanelWidth(raw);
+          setPreviewPanelWidth(total - raw);
+        }
+      }
+    };
+    const onUp = () => { dragRef.current = null; document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [rightPanelWidth, previewPanelWidth, rightPanelCollapsed, session.filePreview, previewPopOut]);
+
+  /**
+   * 处理用户提交的命令（三通道有序判定）
+   *
+   * 通道隔离原则：
+   * - B 通道（web_query）：输入框识别的精细化指令（compact/export/init/rename），
+   *   走 web_query 结构化处理。阻塞会话的指令（compact）在 busy 时 toast 提示
+   *   不可用；非阻塞指令不改变 busy 状态。
+   * - 文本通道（submit_line）：普通文本，或未被识别的斜杠指令（A 类如 /resume /model
+   *   以及已删除指令），全部当普通文本发给 LLM。
+   *
+   * A 类指令（new/resume/delete/model/effort/permissions/plan）已完全交由 UI 控件承载，
+   * 输入框不识别，落入文本通道。
+   *
+   * @param line - 用户输入的命令
+   */
+  const handleSubmit = (line: string) => {
+    if (!line.trim()) return;
+    const trimmed = line.trim();
+
+    // 通道 1：B 类斜杠指令 → web_query（精细化处理，不经过命令注册表）
+    if (trimmed.startsWith('/')) {
+      const cmdName = trimmed.slice(1).split(/\s+/)[0] ?? '';
+      const args = trimmed.slice(1 + cmdName.length).trim();
+
+      // /rename（无参数）→ 弹出会话选择器
+      if (cmdName === 'rename' && !args) {
+        session.setInlineOptions({
+          command: 'rename_select',
+          title: t(lang, 'rename_select_session'),
+          options: session.sessions.map(s => ({
+            value: s.value,
+            label: s.label,
+            active: s.active,
+          })),
+        });
+        return;
+      }
+      // 注：/agent 斜杠指令已移除，agent 创建/管理/模型设置由设置表单的
+      // "代理"标签页承担（AgentsTab）；agent 任务摘要仍在右栏查看。
+      // /goal → 走命令注册表（A 通道，不带 treat_as_text）：后端执行 /goal 命令，
+      // drive_goal 轮次正常流式，命令结果以 toast 呈现（创建目标的长任务入口）。
+      // busy 时不可用，通过 toast 提示
+      if (cmdName === 'goal') {
+        if (session.busy) { showToast(t(lang, 'cmd_unavailable_busy').replace('{cmd}', '/goal'), 'info'); return; }
+        // busy 只随「驱动轮次」的 /goal 进入（与后端 drive_goal 标志对齐）：
+        //   创建（非空且首词非子命令）与 resume 会立即续跑自主轮次 → 占用会话；
+        //   空（状态查询）/ clear / pause / edit 为瞬时注册表操作 → 不进 busy，
+        //   避免"闪一下"。语义锚点：illusion/commands/goal.py::goal_handler。
+        const goalArgs = trimmed.slice(cmdName.length + 1).trim();
+        // 首词原样比较（不 lower）：后端 goal_handler 用精确小写匹配子命令，
+        // 如 "Pause" 不匹配任何子命令 → 按创建处理驱动轮次；前端判定必须
+        // 与该行为一致，否则两端 busy 判定漂移
+        const goalHead = goalArgs.split(/\s+/)[0] || '';
+        const drivesRounds = goalArgs !== '' && !GOAL_INSTANT_SUBCOMMANDS.has(goalHead);
+        if (drivesRounds) session.setBusyTrue();
+        session.sendRequest({ type: 'submit_line', line: trimmed });
+        return;
+      }
+      if (B_COMMANDS.includes(cmdName)) {
+        // busy 下：阻塞指令 toast 提醒不可用；非阻塞指令放行且不改变 busy
+        if (session.busy && BLOCKING_COMMANDS.has(cmdName)) {
+          showToast(t(lang, 'cmd_unavailable_busy').replace('{cmd}', `/${cmdName}`), 'info');
+          return;
+        }
+        // 非阻塞指令不置 busy；阻塞指令（空闲时）置 busy 遮挡输入
+        if (!session.busy && BLOCKING_COMMANDS.has(cmdName)) session.setBusyTrue();
+        session.sendRequest({
+          type: 'web_query',
+          command: cmdName,
+          args,
+          request_id: `q-${Date.now()}`,
+        });
+        return;
+      }
+    }
+
+    // 通道 2：所有其他输入（含 /resume、/model 等非 B 类指令）→ 当 user 消息发给 LLM
+    // treat_as_text=true 告诉后端跳过命令注册表，直接当文本提交给 LLM
+    session.setBusyTrue();
+    session.optimisticSubmit(trimmed); // 乐观渲染 user 消息，后端回执按文本去重
+    // workbench 声明：未持久化的会话在首条消息提交时按当前视图定型
+    session.sendRequest({ type: 'submit_line', line: trimmed, treat_as_text: true, workbench: viewMode === 'canvas' });
+    // 用户发送消息时清空持久化回退草稿，避免非欢迎态 rewind 残留影响后续
+    setRewindDraft(null);
+  };
+
+  /**
+   * 处理内联选项选择
+   *
+   * 当用户从内联选项列表中选择一个选项时触发。
+   *
+   * @param command - 命令名称
+   * @param value - 选中的值
+   */
+  const handleInlineSelect = useCallback((command: string, value: string) => {
+    // /rename 会话选择器 → 弹出文本输入模态框
+    if (command === 'rename_select') {
+      session.setInlineOptions(null);
+      setCustomInputModal({
+        prompt: t(lang, 'rename_enter_name'),
+        command: 'rename',
+        targetSessionId: value,
+      });
+      return;
+    }
+    // agent_branch 选择器已随 /agent 斜杠指令移除（功能由设置表单 AgentsTab 承担）
+    // 内联选项：其余指令直接 apply_select_command 提交
+    session.setInlineOptions(null);
+    session.sendRequest({ type: 'apply_select_command', command, value });
+  }, [session.sendRequest, lang]);
+
+  /**
+   * 处理内联选项关闭
+   *
+   * 当用户关闭内联选项列表时触发。
+   */
+  const handleInlineClose = useCallback(() => session.setInlineOptions(null), []);
+
+  /**
+   * 处理自定义输入提交
+   *
+   * 由 CustomInputModal 触发（现仅由 /rename 触发）。
+   *
+   * @param value - 用户输入的内容
+   */
+  const handleCustomSubmit = useCallback((value: string) => {
+    if (customInputModal && customInputModal.command === 'rename') {
+      // rename 走 web_query 通道（携带目标 session_id，路由到目标会话所在工作区）
+      // 重命名是轻量元数据操作，且目标会话可能是非活跃会话；此处不调用
+      // setBusyTrue——该函数固定对活跃会话置 busy，会误把活跃会话钉在运行态，
+      // 而后端 web_query_result 只重置目标会话 busy，导致活跃会话永久显示运行中。
+      const sid = customInputModal.targetSessionId;
+      session.sendRequest({
+        type: 'web_query',
+        command: 'rename',
+        args: sid ? `${sid} ${value}` : value,
+        session_id: sid ?? undefined,
+        request_id: `q-${Date.now()}`,
+      });
+    }
+    setCustomInputModal(null);
+  }, [customInputModal, session.sendRequest]);
+
+  /**
+   * 处理自定义数字输入取消
+   *
+   * 关闭自定义输入模态框，不做任何提交。
+   */
+  const handleCustomCancel = useCallback(() => {
+    setCustomInputModal(null);
+  }, []);
+
+  // 删除会话弹窗状态（本地控制，数据源来自 session.sessions 主列表）
+  const [deleteSelected, setDeleteSelected] = useState<Set<string>>(new Set());
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  // 删除弹窗退出动画阶段：关闭时先播放淡出，动画结束后再真正卸载
+  const [deleteModalClosing, setDeleteModalClosing] = useState(false);
+  // 单个会话删除确认（侧边栏会话项操作菜单触发）：存储待删除的会话 ID，
+  // 用自定义 React 模态替代原生 window.confirm——原生 confirm 在 Electron
+  // 桌面壳中会阻塞渲染进程并遗留焦点异常，导致后续输入框无法聚焦
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+
+  // 设置配置表单显示状态（首次登录自动弹出，或点击左栏 settings 齿轮手动打开）
+  const [showSetupForm, setShowSetupForm] = useState(false);
+  // 设置表单初始页（目录按钮"管理目录…"直达目录空间页）
+  const [setupInitialTab, setSetupInitialTab] = useState<'settings' | 'agents' | 'workspaces' | 'channels' | 'cron' | 'sandbox'>('settings');
+  // 欢迎界面可见（无任何会话内容且非忙碌）：输入框目录按钮常显，可直接选目录新建。
+  // 忙碌（首条消息生成）时不算欢迎态，输入框回到底部，避免与"思考中"指示器并存
+  const welcomeVisible = session.connected && !session.busy
+    && !(session.staticItems.length > 0 || !!session.assistantBuffer || !!session.streamingReasoning
+      || session.pendingToolCalls.length > 0 || !!session.modal);
+
+  // 首次登录：后端 ready 且 first_login=true 时自动弹出配置表单（仅触发一次）
+  const setupShownRef = useRef(false);
+  useEffect(() => {
+    if (session.ready && session.firstLogin && !setupShownRef.current) {
+      setupShownRef.current = true;
+      setShowSetupForm(true);
+    }
+  }, [session.ready, session.firstLogin]);
+
+  /**
+   * 处理设置表单中界面语言变更
+   *
+   * 通过 WebSocket web_set_setting 即时同步到后端运行时，后端推送
+   * web_setting_changed / state_snapshot 后前端 lang 自动更新。
+   */
+  const handleSetUiLanguage = useCallback((uiLang: 'zh-CN' | 'en-US') => {
+    session.sendRequest({ type: 'web_set_setting', setting_key: 'ui_language', setting_value: uiLang });
+  }, [session.sendRequest]);
+
+  /**
+   * 处理设置表单保存成功
+   *
+   * 配置已通过即时 REST API 写入 settings.json / channels.json / credentials.json，
+   * 前端 state 已同步更新，无需整页刷新。保存后表单保持打开，由用户自行关闭。
+   */
+  const handleSetupSaved = useCallback(() => {
+    session.clearFirstLogin();
+    // 设置保存后主动向后端请求一次状态刷新（context_window/max_tokens/max_turns
+    // 热应用到运行中主机并推送快照），保证右栏上下文窗口与后续请求参数立即生效
+    session.sendRequest({ type: 'web_refresh_status' });
+  }, [session.clearFirstLogin, session.sendRequest]);
+
+  /** 处理关闭设置表单 */
+  const handleCloseSetupForm = useCallback(() => {
+    setShowSetupForm(false);
+  }, []);
+
+  /** 处理停止当前任务（stopping 状态由 hook 管理：line_complete 清除 + 超时兜底） */
+  const handleStop = useCallback(() => {
+    session.sendStop();
+  }, [session.sendStop]);
+
+  /**
+   * 处理回退到指定轮次
+   *
+   * 由 ChatArea 中 user 消息的撤销按钮触发，弹出模式选择弹窗。
+   *
+   * @param turnsToRewind - 需要回退的轮次数
+   */
+  const handleRewindToTurn = useCallback((turnsToRewind: number) => {
+    setRewindConfirm({ turns: turnsToRewind });
+  }, []);
+
+  /**
+   * 确认回退 —— 根据用户选择的模式执行 /rewind N mode
+   *
+   * 通过 submit_line 通道（treat_as_text 缺省=false）直接走命令注册表，
+   * 绕过 web_query 的多步弹窗流程。
+   *
+   * @param mode - 回退模式：code / conversation / both
+   */
+  const handleConfirmRewind = useCallback((mode: string) => {
+    const turns = rewindConfirm?.turns ?? 1;
+    setRewindConfirm(null);
+    session.setBusyTrue();
+    session.sendRequest({ type: 'submit_line', line: `/rewind ${turns} ${mode}` });
+  }, [rewindConfirm, session]);
+
+  /**
+   * 处理重新生成
+   *
+   * 找到最后一条 user 消息文本，先 /rewind 1 both 回退一轮，
+   * rewind 完成后（busy→false）自动重发 user 消息。
+   * pendingRegenerateRef 未消费时忽略重复触发，避免 rewind 期间
+   * 多次排队导致回退多轮或重发竞态。
+   */
+  const handleRegenerate = useCallback(() => {
+    if (pendingRegenerateRef.current) return;
+    const lastUserMsg = [...session.staticItems].reverse().find((i) => i.role === 'user' && !i.is_command);
+    if (!lastUserMsg) return;
+    pendingRegenerateRef.current = lastUserMsg.text;
+    session.setBusyTrue();
+    session.sendRequest({ type: 'submit_line', line: '/rewind 1 both' });
+  }, [session]);
+
+  // 监听 busy 状态变化：rewind 完成后自动重发 user 消息（重新生成）
+  useEffect(() => {
+    if (prevBusyRef.current && !session.busy && pendingRegenerateRef.current) {
+      const text = pendingRegenerateRef.current;
+      pendingRegenerateRef.current = null;
+      session.setBusyTrue();
+      session.sendRequest({ type: 'submit_line', line: text, treat_as_text: true });
+    }
+    prevBusyRef.current = session.busy;
+  }, [session.busy, session]);
+
+  /** 处理新建会话：直接新建（当前活跃目录）；cwd 指定时在该目录新建。
+   *  目录选择由欢迎界面常显的输入框目录按钮承担，不再弹出选择弹窗 */
+  const handleNewSession = (cwd?: string, workbench?: boolean) => {
+    setRewindDraft(null); // 新建会话清空持久化回退草稿
+    setActiveMenu(null); // 切换会话收起所有下拉，避免残留展开态
+    session.newSession(cwd, workbench ?? viewMode === 'canvas');
+  };
+
+  /** 切换右栏折叠/展开：展开时按需请求资源快照（缺省 = 活跃会话所在工作区）。
+   *  仅当切换时已有文件预览（用户正在覆盖自动布局）才标记为已自定义，后续文件预览不再
+   *  自动重置该栏与预览列宽度；仅点开区块栏浏览文件（尚无预览）不标记，保证首次点选
+   *  文件后仍自动折叠区块栏并让预览列占满最大宽度。
+   *  展开时若已有文件预览，收紧预览列宽度，使「区块栏 + 预览列」总量不超出 2/5 屏上限
+   *  （避免在已有最大宽度预览列上继续叠加导致超限）。
+   *  收起（隐藏）区块栏时，若两栏之和已到达最大宽度，则预览列自动占满最大宽度（按需接管
+   *  释放的空间）；反之保持原预览宽度。关闭文件预览不受影响，保持正常逻辑。 */
+  const toggleRightPanel = useCallback(() => {
+    const willExpand = rightPanelCollapsed;
+    const previewActive = !!session.filePreview && !previewPopOut;
+    // 仅当切换时已有文件预览（用户在覆盖自动布局）才标记为已自定义，避免首次点选文件前的
+    // 普通展开被误判为用户自定义设置、从而跳过首次预览的自动折叠与满宽
+    if (previewActive) userAdjustedPanelsRef.current = true;
+    if (willExpand) {
+      session.requestResources();
+      // 展开区块栏时若已有文件预览，收紧预览列以便容纳区块栏，总量不超 2/5 屏上限
+      if (previewActive) {
+        const maxTotal = Math.floor(window.innerWidth * 0.4);
+        setPreviewPanelWidth(Math.max(MIN_PREVIEW_PANEL, Math.min(previewPanelWidth, maxTotal - MIN_RIGHT_PANEL)));
+      }
+    } else if (previewActive) {
+      // 收起（隐藏）区块栏时：若两栏之和已达到最大宽度，预览列自动占满最大宽度；
+      // 反之（未达最大宽度）保持原预览宽度
+      const maxTotal = Math.floor(window.innerWidth * 0.4);
+      if (rightPanelWidth + previewPanelWidth >= maxTotal) {
+        setPreviewPanelWidth(maxTotal);
+      }
+    }
+    setRightPanelCollapsed(willExpand ? false : true);
+  }, [rightPanelCollapsed, session.requestResources, session.filePreview, previewPopOut, previewPanelWidth, rightPanelWidth]);
+
+  // 右栏数据源回调：useCallback 稳定引用，避免内联箭头导致
+  // FileTreeSection / GitSection 的自动拉取 effect 每帧重跑（无效抖动）
+  const handleRequestFileTree = useCallback((path?: string, force?: boolean) => {
+    session.requestFileTree(path, force);
+  }, [session.requestFileTree]);
+  const handleRequestGitStatus = useCallback(() => {
+    session.requestGitStatus();
+  }, [session.requestGitStatus]);
+  const handleRefreshResources = useCallback(() => {
+    session.requestResources();
+  }, [session.requestResources]);
+  const handleRequestSessionFiles = useCallback(() => {
+    session.requestSessionFiles();
+  }, [session.requestSessionFiles]);
+  // 单轮变更条点击文件：稳定包装（内联箭头函数会让 memo(TurnView) 全量失效）。
+  // Git 内文件开 diff 变更视图；deleted/工作区外/非 Git 降级内容预览
+  const handleOpenSessionFile = useCallback((path: string, kind: 'content' | 'diff') => {
+    if (kind === 'diff') session.openFileDiff(path);
+    else session.openSessionFile(path);
+  }, [session.openFileDiff, session.openSessionFile]);
+
+  // 分叉会话（聊天气泡底部 fork 按钮触发）：保留前 N 轮复制为新会话，
+  // 后端完成后经 web_restore_completed 自动切换视图
+  const handleForkTurn = useCallback((turnsToKeep: number) => {
+    session.forkSession(turnsToKeep);
+  }, [session.forkSession]);
+
+  // 文件/diff 预览出现时自动调整布局：折叠区块栏，让文件预览栏占满最大宽度（2/5 屏）。
+  // 仅处理同一预览键（kind|path）的首次出现，预览载荷反复刷新（加载中→内容）不重复调整；
+  // 打开新文件/切视图时再次调整。若用户已手动点开区块栏或调整过各栏宽度（userAdjustedPanelsRef），
+  // 不再自动折叠区块栏或调整预览列宽度，尊重用户自定义设置
+  useEffect(() => {
+    if (!session.filePreview || previewPopOut) return;
+    // 用户已手动调整过右栏：不重置其折叠状态与预览列宽度
+    if (userAdjustedPanelsRef.current) return;
+    const key = `${session.filePreview.kind ?? 'content'}|${session.filePreview.path}`;
+    if (autoWidenKeyRef.current === key) return;
+    autoWidenKeyRef.current = key;
+    // 首次打开该文件预览：折叠区块栏，让预览列占满最大宽度（2/5 屏）
+    setRightPanelCollapsed(true);
+    const maxTotal = Math.floor(window.innerWidth * 0.4);
+    setPreviewPanelWidth(maxTotal);
+  }, [session.filePreview, previewPopOut]);
+
+  // 硬约束：区块栏与预览列同时可见时，两者总量不超 2/5 屏上限。
+  // 用户拖宽区块栏或调整宽度后触发，仅收紧预览列以保证不越界，不改其余用户设置
+  useEffect(() => {
+    if (!session.filePreview || previewPopOut || rightPanelCollapsed) return;
+    const maxTotal = Math.floor(window.innerWidth * 0.4);
+    if (rightPanelWidth + previewPanelWidth > maxTotal) {
+      setPreviewPanelWidth(Math.max(MIN_PREVIEW_PANEL, maxTotal - rightPanelWidth));
+    }
+  }, [session.filePreview, previewPopOut, rightPanelCollapsed, rightPanelWidth, previewPanelWidth]);
+
+  // 切换会话 / 切换目录时重置右栏 UI：折叠右栏、关闭文件预览，避免右栏残留
+  // 上一轮会话/目录的文件预览；清空预览扩宽的防重入标记并复位"用户手动调整"
+  // 标记（新工作区/新会话视为新上下文，恢复首次文件预览的自动折叠 + 满宽）。
+  // 数据清理由 hook 内部的活跃会话切换 effect 承担（跨目录全量清空、同目录
+  // 仅清会话隔离数据），并统一触发 refreshRightPanel 重拉。
+  useEffect(() => {
+    if (!session.activeSessionId) return; // 尚未建立会话时不处理
+    setRightPanelCollapsed(true);
+    setPreviewPopOut(false);
+    autoWidenKeyRef.current = null;
+    userAdjustedPanelsRef.current = false;
+    session.closeFilePreview();
+  }, [session.activeSessionId, session.closeFilePreview]);
+
+  /**
+   * 处理选择会话（A 通道，零 suppress）
+   *
+   * 点击会话项 → 发送 web_restore_session（携带所属目录，跨工作区路由），
+   * 前端立即进入 restoring 态显示加载动画，收到 web_restore_completed 后
+   * 清除动画并替换转录。不再有 /resume 弹框副作用。
+   *
+   * @param id - 会话 ID
+   * @param cwd - 会话所属工作区目录（可选，恢复请求路由依据）
+   */
+  const handleSelectSession = useCallback((id: string, cwd?: string) => {
+    // 视图已就绪的会话纯本地切换（瞬时，无加载态）；未恢复的会话由
+    // hook 自动发送 web_restore_session 并显示加载动画
+    setRewindDraft(null); // 切换会话清空持久化回退草稿
+    setActiveMenu(null); // 切换会话收起所有下拉，避免残留展开态
+    session.activateSession(id, cwd);
+  }, [session.activateSession]);
+
+  /** 处理列出会话（A 通道，后端推送 web_sessions） */
+  const handleListSessions = useCallback(() => {
+    session.sendRequest({ type: 'web_request_sessions' });
+  }, [session.sendRequest]);
+
+  /** 处理删除会话：打开删除弹窗（数据源来自 session.sessions 主列表） */
+  const handleDeleteSessions = useCallback(() => {
+    setDeleteSelected(new Set());
+    setDeleteModalClosing(false);
+    setDeleteModalOpen(true);
+  }, []);
+
+  /**
+   * 处理重命名单个会话（侧边栏会话项操作菜单触发）
+   *
+   * 直接打开文本输入模态框（复用 /rename 通道），携带目标会话 ID，
+   * 提交后由 handleCustomSubmit 的 rename 分支发送 web_query。
+   *
+   * @param sid - 会话 ID
+   */
+  const handleRenameSession = useCallback((sid: string) => {
+    setActiveMenu(null); // 收起输入框/工具栏下拉，避免遮挡
+    setCustomInputModal({
+      prompt: t(lang, 'rename_enter_name'),
+      command: 'rename',
+      targetSessionId: sid,
+    });
+  }, [lang]);
+
+  /**
+   * 处理删除单个会话（侧边栏会话项操作菜单触发）
+   *
+   * 打开自定义确认模态；确认后直接删除目标会话。若删除的是当前会话，
+   * 后端原子化新建空会话，与删除弹窗的批量删除路径保持一致。
+   * 注意：这里必须用 React 模态而非原生 window.confirm——原生 confirm
+   * 在 Electron 桌面壳中会阻塞渲染进程，关闭后遗留焦点异常，导致
+   * 跳转欢迎界面后输入框无法聚焦输入（最小化/最大化才恢复）。
+   *
+   * @param sid - 会话 ID
+   */
+  const handleDeleteOneSession = useCallback((sid: string) => {
+    setDeleteConfirm(sid);
+  }, []);
+
+  /** 确认删除单个会话（自定义确认模态的确定按钮） */
+  const handleConfirmDeleteOne = useCallback(() => {
+    if (!deleteConfirm) return;
+    setDeleteConfirm(null);
+    // 运行中的会话后端会跳过删除（保持任务进行），若本地先行移除会导致
+    // 会话"短暂消失又出现"，用户误以为删除失败——此处直接提示并中止
+    if (session.sessions.some((s) => s.value === deleteConfirm && s.busy)) {
+      showToast(t(lang, 'delete_session_busy'), 'info');
+      return;
+    }
+    setRewindDraft(null); // 删除会话（可能新建空会话）清空持久化回退草稿
+    session.deleteSessions([deleteConfirm]);
+  }, [deleteConfirm, session.sessions, session.deleteSessions, showToast, lang]);
+
+  /** 取消删除单个会话（自定义确认模态的取消/遮罩点击） */
+  const handleCancelDeleteOne = useCallback(() => {
+    setDeleteConfirm(null);
+  }, []);
+
+  // 删除确认模态键盘支持：Escape 取消（对齐 CustomInputModal 的键盘交互）
+  useEffect(() => {
+    if (!deleteConfirm) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') handleCancelDeleteOne();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [deleteConfirm, handleCancelDeleteOne]);
+
+  // 弹窗打开时把焦点移到"取消"按钮：无 autoFocus 时焦点可能停留在
+  // 输入框，弹窗后的 Enter 会发出消息而非操作弹窗；落在取消上时
+  // Enter/Escape 均为安全动作
+  const deleteCancelRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (deleteConfirm) deleteCancelRef.current?.focus();
+  }, [deleteConfirm]);
+
+  /** 触发删除弹窗退出动画（真正卸载由 handleDeleteModalAnimationEnd 完成） */
+  const requestDeleteModalClose = useCallback(() => {
+    setDeleteModalClosing(true);
+  }, []);
+
+  /** 退出动画结束：真正卸载弹窗并清空选中状态（仅响应弹窗自身动画） */
+  const handleDeleteModalAnimationEnd = useCallback((e: React.AnimationEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget) return; // 忽略子元素冒泡的动画事件
+    if (!deleteModalClosing) return;
+    setDeleteModalOpen(false);
+    setDeleteModalClosing(false);
+    setDeleteSelected(new Set());
+  }, [deleteModalClosing]);
+
+  /**
+   * 处理确认删除
+   *
+   * 删除所有选中的会话。删除全部时限定在当前活跃工作区目录
+   * （多目录空间下互不影响）。
+   */
+  const handleConfirmDelete = useCallback(() => {
+    const ids = Array.from(deleteSelected);
+    if (ids.length > 0) {
+      // 运行中的会话后端会跳过删除（保持任务进行）：本地先行移除会导致
+      // 会话"短暂消失又复活"。与单删路径一致——过滤运行中会话并提示
+      const busyIds = new Set(session.sessions.filter((s) => s.busy).map((s) => s.value));
+      const deletable = ids.filter((id) => !busyIds.has(id));
+      if (deletable.length < ids.length) showToast(t(lang, 'delete_session_busy'), 'info');
+      if (deletable.length > 0) {
+        // 直接发送删除请求；若包含当前会话，后端会原子化地新建空会话，
+        // 避免前端"先删后建"两阶段逻辑的竞态。
+        setRewindDraft(null); // 删除会话（可能新建空会话）清空持久化回退草稿
+        session.deleteSessions(deletable);
+      }
+    }
+    requestDeleteModalClose();
+  }, [deleteSelected, session.sessions, session.deleteSessions, requestDeleteModalClose, showToast, lang]);
+
+  /**
+   * 处理关闭删除模态框
+   *
+   * 触发退出动画后关闭删除会话弹窗并清除选中状态。
+   */
+  const handleCloseDeleteModal = useCallback(() => {
+    requestDeleteModalClose();
+  }, [requestDeleteModalClose]);
+
+  /**
+   * 切换删除项选中状态
+   *
+   * @param v - 会话 ID
+   */
+  const toggleDeleteItem = useCallback((v: string) => {
+    setDeleteSelected((prev) => { const n = new Set(prev); n.has(v) ? n.delete(v) : n.add(v); return n; });
+  }, []);
+
+  /** 待删除的普通会话列表（来自主会话列表 session.sessions） */
+  const regularSessions = session.sessions;
+  /** 总是提供"删除全部"入口 */
+  const hasAllOption = session.sessions.length > 0;
+
+  /** 目录 basename（删除弹窗分组显示用，与 Sidebar 分组一致） */
+  const deleteGroupName = (path: string): string => {
+    const parts = (path || '').split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] || path || t(lang, 'workspace_unknown');
+  };
+
+  /** 删除弹窗按目录分组（保持会话列表顺序，同目录会话归组） */
+  const deleteGroups = useMemo(() => {
+    const byCwd = new Map<string, typeof regularSessions>();
+    for (const s of regularSessions) {
+      const key = s.cwd || '';
+      const bucket = byCwd.get(key);
+      if (bucket) bucket.push(s);
+      else byCwd.set(key, [s]);
+    }
+    return Array.from(byCwd.entries()).map(([cwd, items]) => ({
+      cwd,
+      name: deleteGroupName(cwd),
+      sessions: items,
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [regularSessions, lang]);
+
+  /** 整组删除：删除该目录下的全部会话 */
+  const handleDeleteGroup = useCallback((group: { name: string; sessions: { value: string }[] }) => {
+    if (!window.confirm(t(lang, 'delete_group_confirm')
+      .replace('{name}', group.name)
+      .replace('{count}', String(group.sessions.length)))) {
+      return;
+    }
+    // 与批量删除同一守卫：运行中的会话后端会跳过，本地先行移除会"消失又复活"
+    const busyIds = new Set(session.sessions.filter((s) => s.busy).map((s) => s.value));
+    const deletable = group.sessions.map((s) => s.value).filter((id) => !busyIds.has(id));
+    if (deletable.length < group.sessions.length) showToast(t(lang, 'delete_session_busy'), 'info');
+    if (deletable.length === 0) {
+      requestDeleteModalClose();
+      return;
+    }
+    setRewindDraft(null); // 整组删除（可能删除当前会话并新建空会话）清空持久化回退草稿
+    session.deleteSessions(deletable);
+    requestDeleteModalClose();
+  }, [session.sessions, session.deleteSessions, lang, requestDeleteModalClose, showToast]);
+
+  /**
+   * 处理权限响应
+   *
+   * @param requestId - 请求 ID
+   * @param allowed - 是否允许
+   * @param sessionAllow - 是否允许本会话内（不持久化）
+   * @param toolName - 工具名称
+   */
+  const handlePermissionResponse = (requestId: string, allowed: boolean, sessionAllow: boolean, toolName: string) => {
+    session.sendRequest({ type: 'permission_response', request_id: requestId, allowed, session_allow: sessionAllow, tool_name: toolName });
+    session.clearModal();
+  };
+
+  /**
+   * 处理问答响应
+   *
+   * @param requestId - 请求 ID
+   * @param answer - 用户回答
+   */
+  const handleQuestionResponse = (requestId: string, answer: string) => {
+    session.sendRequest({ type: 'question_response', request_id: requestId, answer });
+    session.clearModal();
+  };
+
+  /**
+   * 当前文件预览是否有 Git 变更（决定是否显示"Diff"切换按钮）
+   *
+   * - Git 快照未加载 / 文件未命名：返回 null（未知，默认显示以保留既有行为）
+   * - 非 Git 仓库：返回 false（无 diff 可看，隐藏 Diff 按钮）
+   * - 文件出现在变更列表（含未跟踪）中：返回 true
+   * - 其余（已跟踪但无变更）：返回 false，隐藏 Diff 按钮，避免展示空的 diff
+   */
+  const previewHasDiff = useMemo(() => {
+    const git = session.gitStatus;
+    if (!git || !session.filePreview) return null;
+    if (!git.is_repo) return false;
+    // 预览 path 可能为绝对路径原串（单轮变更条统一下发），gitStatus.files
+    // 为工作区内 posix 相对路径：规范化分隔符并剥离工作区前缀后再比较
+    const p = (session.filePreview.path || '').replace(/\\/g, '/');
+    const cwd = (session.activeWorkspaceCwd || session.resourcesCwd || '')
+      .replace(/\\/g, '/').replace(/\/+$/, '');
+    const rel = cwd && p.toLowerCase().startsWith(`${cwd.toLowerCase()}/`)
+      ? p.slice(cwd.length + 1)
+      : p;
+    // 已知限制：rel 剩余部分大小写敏感；工作区为仓库子目录时 porcelain
+    // 路径（仓库根相对）多一层前缀仍不匹配 → 仅丢失 Diff 入口（降级内容
+    // 视图可接受），不影响数据正确性
+    return (git.files ?? []).some((f) => f.path === rel);
+  }, [session.gitStatus, session.filePreview, session.activeWorkspaceCwd, session.resourcesCwd]);
+
+  /** 输入框 + 工具栏合并为单卡片（欢迎态注入标题下方，非欢迎态置于底部） */
+  const composer = (
+    <div className="glass-surface rounded-3xl focus-within:shadow-glow">
+      {/* busy 合入 awaitingNewSession：新建/删除补位的会话切换等待期内禁止提交，
+          防止消息发进切换前的旧会话（如工作台守卫补建期间发进 chat 会话） */}
+      <PromptInput ref={promptInputRef} lang={lang} busy={session.busy || session.awaitingNewSession} connected={session.connected}
+        hasActiveTasks={session.tasks.some(
+          (t) =>
+            (t.status === 'in_progress' || t.status === 'pending') &&
+            t.metadata?.owner_session_id === session.activeSessionId,
+        )}
+        commands={session.commands} onSubmit={handleSubmit} onStop={handleStop} stopping={session.stopping}
+        inlineOptions={session.inlineOptions} onInlineSelect={handleInlineSelect} onInlineClose={handleInlineClose}
+        workspaces={session.workspaces} activeCwd={session.activeWorkspaceCwd}
+        welcomeVisible={welcomeVisible}
+        onPickWorkspace={(cwd) => handleNewSession(cwd)}
+        onAddWorkspace={(path) => session.addWorkspace(path)}
+        onManageWorkspaces={() => { setSetupInitialTab('workspaces'); setShowSetupForm(true); }}
+        initialDraft={rewindDraft ?? undefined}
+        onConsumeInitialDraft={() => setRewindDraft(null)}
+        subscribeFileMentions={session.subscribeFileMentions}
+        onRequestFileMentions={session.requestFileMentions}
+        activeMenu={activeMenu} onMenuOpen={setActiveMenu}>
+        <Toolbar lang={lang} status={session.status}
+          modelOptions={session.modelOptions}
+          onSetSetting={(key, value) => {
+            if (key === 'model') session.setModelSwitching(true);
+            session.sendRequest({ type: 'web_set_setting', setting_key: key, setting_value: value });
+          }}
+          onRequestModels={() => session.sendRequest({ type: 'web_request_models' })}
+          modelSwitching={session.modelSwitching}
+          activeMenu={activeMenu} onMenuOpen={setActiveMenu} />
+      </PromptInput>
+    </div>
+  );
+
+  // 对话流与 GoalBar 元素：对话/画布两种模式共用（画布模式下对话列保留在
+  // 左侧——画布只接管"陈列区"，不吞掉与 agent 的对话入口）
+  // key={activeSessionId}：ChatArea 的会话级 UI 状态（折叠/滚动/轮次导航）
+  // 随会话切换整体重挂载，天然归属正确会话——杜绝跨会话状态泄漏
+  const chatArea = (
+    <ChatArea key={session.activeSessionId ?? '__none__'} lang={lang} staticItems={session.staticItems} assistantBuffer={session.assistantBuffer}
+      streamingReasoning={session.streamingReasoning} pendingToolCalls={session.pendingToolCalls}
+      reasoningStreaming={session.reasoningStreaming}
+      busy={session.busy} connected={session.connected}
+      modal={session.modal} onPermissionResponse={handlePermissionResponse}
+      onQuestionResponse={handleQuestionResponse}
+      restoringSessionId={session.restoringSessionId ?? (session.awaitingNewSession ? '__pending_new__' : null)}
+      onRewindToTurn={handleRewindToTurn} onRegenerate={handleRegenerate}
+      onForkTurn={handleForkTurn}
+      turnOutline={session.turnOutline} firstLoadedTurn={session.firstLoadedTurn}
+      loadingHistory={session.loadingHistory} onRequestHistory={session.requestHistory}
+      transcriptReplaceTick={session.transcriptReplaceTick}
+      onOpenSessionFile={handleOpenSessionFile}>
+      {welcomeVisible && composer}
+    </ChatArea>
+  );
+  const goalBar = (
+    <GoalBar lang={lang}
+      goal={(session.status?.goal as GoalStatus | null | undefined) ?? null}
+      actionError={session.goalActionError}
+      onEdit={(objective) => session.sendGoalAction('edit', objective)}
+      onPause={() => session.sendGoalAction('pause')}
+      onResume={() => session.sendGoalAction('resume')}
+      onClear={() => session.sendGoalAction('clear')}
+      onDismissError={session.clearGoalActionError}
+      onBlocked={(code, message) => {
+        // blockedReason.code → 本地化文案；model-reported / 未知 code
+        // 回退后端原始 message，避免信息丢失
+        const localized = t(lang, `goal:blocked.${code}`);
+        showToast(localized.startsWith('goal:blocked.') ? message : localized, 'error');
+      }} />
+  );
+  // 切换工作台模式：视图切换 + 自动写 workbench 设置（enabled/default_view，
+  // 只对新会话生效——已启动会话的 agent 工具集不变）。会话的选取/补建一律
+  // 会话选取由后端 web_ensure_session 原子完成（见下方 ensureSession 调用）。
+  const handleSetWorkbenchMode = useCallback((mode: 'chat' | 'canvas') => {
+    if (mode === viewMode) return;
+    handleSetViewMode(mode);
+    settingsApi.updateWorkbench({
+      enabled: mode === 'canvas',
+      default_view: mode,
+    }).catch(() => { /* 设置写入失败不影响视图切换 */ });
+    // 会话选取/创建由后端 web_ensure_session 原子完成（复用或创建正确类型
+    // 的会话并激活），前端不再自行推断类型——那是历次回归的根源
+    session.ensureSession(mode === 'canvas');
+  }, [handleSetViewMode, viewMode, session.ensureSession]);
+
+  // 初始加载：如果在工作台模式，让后端确保存在 wb 会话（零推断——
+  // 前端只发意图，后端原子解析复用或创建）。ready 后只调一次。
+  const initialEnsureDone = useRef(false);
+  useEffect(() => {
+    if (!session.ready || initialEnsureDone.current) return;
+    initialEnsureDone.current = true;
+    if (viewMode === 'canvas') {
+      session.ensureSession(true);
+    }
+  }, [session.ready, viewMode, session.ensureSession]);
+
+
+  return (
+    <div className="flex flex-col h-screen">
+      {/* 桌面壳自定义顶部栏：与主内容同门控——遮罩期不渲染，避免品牌图标/字体
+          浮在遮罩层上方（浏览器端 TitleBar 本身返回 null） */}
+      {revealReady && !session.bootstrapping && <TitleBar lang={lang} />}
+      {/* 首帧引导（bootstrapping）未结束 / 遮罩未褪去（revealReady）期间
+          不渲染主界面，只保留全屏遮罩覆盖，避免"主界面先露出、遮罩后淡入"
+          的翻转闪烁；首个会话内容呈现完成后一次性渲染主界面。 */}
+      {revealReady && !session.bootstrapping && (
+      <div className="flex flex-1 min-h-0">
+      <Sidebar lang={lang} connected={session.connected} sessions={session.sessions.filter((s) => !!s.workbench === (viewMode === 'canvas'))}
+        workspaces={session.workspaces} activeWorkspaceCwd={session.activeWorkspaceCwd}
+        onNewSession={handleNewSession} onSelectSession={handleSelectSession}
+        onListSessions={handleListSessions}
+        onDeleteSessions={handleDeleteSessions}
+        onRenameSession={handleRenameSession}
+        onDeleteSession={handleDeleteOneSession}
+        collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
+        width={sidebarWidth} restoringSessionId={session.restoringSessionId}
+        onOpenSettings={() => { setSetupInitialTab('settings'); setShowSetupForm(true); }}
+        workbenchActive={viewMode === 'canvas'} onSetWorkbenchMode={handleSetWorkbenchMode} />
+      <div className={`flex flex-1 min-w-0 min-h-0 relative ${viewMode === 'canvas' ? 'flex-row' : 'flex-col'} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+        {/* CAD 画布模式：对话列保留在左（转录），画布接管陈列区 */}
+        {viewMode === 'canvas' ? (
+          /* CAD 画布工作台：三栏布局（对话列/画布/建模面板）整体归 WorkbenchView */
+          <WorkbenchView lang={lang}
+            chatArea={chatArea} composer={composer} goalBar={goalBar}
+            canvasDoc={session.canvasDoc} onPushDoc={session.updateCanvasDoc}
+            cadState={session.cadState} onFocusSolidWorks={session.focusSolidWorks}
+            onBackToChat={() => handleSetViewMode('chat')} connected={session.connected}
+            onRefreshCanvas={session.refreshCanvas}
+            conversationEmpty={session.staticItems.length === 0 && !session.assistantBuffer && !session.streamingReasoning && !session.busy}
+            cadConnectTick={session.cadConnectTick} />
+        ) : (
+          <>
+            {chatArea}
+            {/* 非欢迎态或会话恢复中：输入框 + 工具栏恢复到底部；宽度比主聊天区每边宽 17px（--composer-card-max-width）。
+                恢复中 ChatArea 提前返回加载卡不渲染欢迎态 composer，故不会重复渲染。
+                GoalBar 停靠在输入框卡片上方 */}
+            {(!welcomeVisible || session.restoringSessionId) && (
+              <div className="mx-auto max-w-[var(--composer-card-max-width)] w-full min-w-0 px-6 md:px-10 lg:px-16 pt-0 pb-4 shrink-0 flex flex-col gap-1.5">
+                {goalBar}
+                {composer}
+              </div>
+            )}
+            {rightPanelCollapsed && !welcomeVisible && !session.restoringSessionId && (
+              <RightPanelControls lang={lang} status={session.status} onToggle={toggleRightPanel} />
+            )}
+          </>
+        )}
+        {/* 顶部左侧按钮组（Sidebar 折叠态承载）：对话/画布两模式通用 */}
+        {sidebarCollapsed && (
+          <SidebarControls lang={lang} connected={session.connected}
+            onExpand={() => setSidebarCollapsed(false)}
+            onNewSession={() => handleNewSession(undefined, viewMode === 'canvas')}
+            onAddCard={() => {
+              // 折叠态顶栏隐藏：按钮列的"添加卡片"复用同一文档操作
+              if (session.canvasDoc) session.updateCanvasDoc(buildAddNoteDoc(session.canvasDoc));
+            }}
+            onDeleteSessions={handleDeleteSessions}
+            onOpenSettings={() => { setSetupInitialTab('settings'); setShowSetupForm(true); }}
+            workbenchActive={viewMode === 'canvas'}
+            onSetWorkbenchMode={handleSetWorkbenchMode} />
+        )}
+      </div>
+      {!rightPanelCollapsed && !welcomeVisible && viewMode === 'chat' && (
+      <div className="relative shrink-0">
+        {/* 右侧（聊天区|右栏）拉伸热区：透明、不占布局、无视觉条（置于卡片外避免裁剪） */}
+        <div className="absolute inset-y-0 -left-2 w-4 cursor-col-resize z-10"
+          onMouseDown={(e) => handleResizeStart('right', e)} />
+        <RightPanel lang={lang} status={session.status}
+          collapsed={rightPanelCollapsed} onToggle={toggleRightPanel}
+          onRefreshResources={handleRefreshResources}
+          todoItems={session.todoItems}
+          agentTasks={session.agentTasks}
+          onRequestAgentTasks={() => session.requestAgentTasks()}
+          onViewAgentTask={(id) => session.viewAgentSummary(id)}
+          fileTree={session.fileTree} fileTreeLoadingPaths={session.fileTreeLoadingPaths}
+          gitStatus={session.gitStatus} gitLoading={session.gitLoading}
+          sessionFiles={session.sessionFiles}
+          sessionFilesLoading={session.sessionFilesLoading}
+          onRequestSessionFiles={handleRequestSessionFiles}
+          onOpenSessionFile={(path) => session.openSessionFile(path)}
+          onRequestFileTree={handleRequestFileTree}
+          onRequestGitStatus={handleRequestGitStatus}
+          onOpenFile={(path) => session.openFilePreview(path)}
+          onOpenFileDiff={(path) => session.openFileDiff(path)}
+          skills={session.skills} plugins={session.plugins}
+          rules={session.rules} mcpServers={session.mcpServers}
+          width={rightPanelWidth} />
+      </div>
+      )}
+
+      {/* 文件预览停靠列：右栏右侧独立显示（右栏折叠时仍在）；
+          与右栏逻辑一致——欢迎界面时隐藏，回到会话视图自动恢复 */}
+      {session.filePreview && !previewPopOut && !welcomeVisible && viewMode === 'chat' && (
+        <div className="relative shrink-0">
+          {/* 预览列拉伸热区：透明、不占布局、无视觉条 */}
+          <div className="absolute inset-y-0 -left-2 w-4 cursor-col-resize z-10"
+            onMouseDown={(e) => handleResizeStart('preview', e)} />
+          <FilePreviewPanel
+            lang={lang}
+            payload={session.filePreview}
+            loading={session.filePreviewLoading}
+            width={previewPanelWidth}
+            hasDiff={previewHasDiff}
+            onOpenContent={(path) => session.openFilePreview(path)}
+            onOpenDiff={(path) => session.openFileDiff(path)}
+            onPopOut={() => setPreviewPopOut(true)}
+            onClose={() => { session.closeFilePreview(); setPreviewPopOut(false); }} />
+        </div>
+      )}
+      </div>
+      )}
+
+      {/* 删除会话弹窗（仅 sidebar 触发；按目录分组查看，支持整组删除） */}
+      {deleteModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className={`absolute inset-0 bg-black/35 backdrop-blur-md ${deleteModalClosing ? 'animate-fade-out' : 'animate-fade'}`} onClick={handleCloseDeleteModal} />
+          <div
+            onAnimationEnd={handleDeleteModalAnimationEnd}
+            className={`relative bg-surface-card rounded-2xl border border-border-light shadow-card w-[460px] max-h-[70vh] flex flex-col ${deleteModalClosing ? 'animate-scale-out' : 'animate-scale-in'} modal-origin-center`}
+          >
+            <div className="px-6 py-4 border-b border-border-light">
+              <h3 className="text-lg font-semibold text-content-primary">{t(lang, 'delete_session')}</h3>
+            </div>
+            <div className="flex-1 overflow-y-auto py-2">
+              {regularSessions.length === 0 ? (
+                <div className="px-6 py-8 text-center text-sm text-content-disabled">{t(lang, 'no_sessions')}</div>
+              ) : deleteGroups.map((group, gi) => (
+                <DeleteGroupSection
+                  key={group.cwd || `__unknown_${gi}`}
+                  group={group}
+                  deleteSelected={deleteSelected}
+                  onToggleItem={toggleDeleteItem}
+                  onDeleteGroup={handleDeleteGroup}
+                  lang={lang}
+                />
+              ))}
+            </div>
+            <div className="px-6 py-4 border-t border-border-light flex items-center justify-between">
+              <div>{hasAllOption && (
+                <button onClick={() => {
+                  // 删除全部限定在当前活跃工作区目录（多目录空间下互不影响）；
+                  // 后端会原子化地新建空会话，避免两阶段竞态。
+                  // 运行中会话被后端跳过，若全部忙碌则中止并提示（与其他删除路径一致）
+                  const activeCwd = session.activeWorkspaceCwd;
+                  const busyInScope = session.sessions.some((s) => s.busy && (!activeCwd || s.cwd === activeCwd));
+                  if (busyInScope) {
+                    showToast(t(lang, 'delete_session_busy'), 'info');
+                    return;
+                  }
+                  setRewindDraft(null); // 清空（可能新建空会话）持久化回退草稿
+                  session.deleteSessions([], true, activeCwd ?? undefined);
+                  requestDeleteModalClose();
+                }} className="danger-action px-4 py-2 text-sm text-danger rounded-lg cursor-pointer">{t(lang, 'delete_all_workspace')}</button>
+              )}</div>
+              <div className="flex gap-2">
+                <button onClick={handleCloseDeleteModal} className="px-4 py-2 text-sm text-content-secondary glass-option-hover rounded-lg transition-colors cursor-pointer border border-white/40">{t(lang, 'cancel')}</button>
+                <button onClick={handleConfirmDelete} disabled={deleteSelected.size === 0}
+                  className="px-4 py-2 text-sm text-white bg-danger hover:bg-danger-hover rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">
+                  {t(lang, 'confirm_delete')} ({deleteSelected.size})
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 回退确认弹窗（选择回退范围） */}
+      {rewindConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/35 backdrop-blur-md animate-fade-in" onClick={() => setRewindConfirm(null)} />
+          <div className="relative bg-surface-card rounded-2xl border border-border-light shadow-card w-[380px] flex flex-col animate-scale-in modal-origin-center">
+            <div className="px-6 py-4 border-b border-border-light">
+              <h3 className="text-lg font-semibold text-content-primary">{t(lang, 'rewind_confirm_title')}</h3>
+            </div>
+            <div className="py-2 px-1">
+              {([
+                { mode: 'both', label: t(lang, 'rewind_both'), desc: t(lang, 'rewind_both_desc') },
+                { mode: 'conversation', label: t(lang, 'rewind_conversation'), desc: t(lang, 'rewind_conversation_desc') },
+              ] as const).map((opt) => (
+                <button
+                  key={opt.mode}
+                  onClick={() => handleConfirmRewind(opt.mode)}
+                  className="w-full text-left px-6 py-3 cursor-pointer glass-option-hover transition-colors rounded-lg flex items-center justify-between group"
+                >
+                  <div>
+                    <div className="text-sm font-medium text-content-primary">{opt.label}</div>
+                    <div className="text-xs text-content-disabled mt-0.5">{opt.desc}</div>
+                  </div>
+                  <svg className="w-4 h-4 text-content-disabled opacity-0 group-hover:opacity-100 transition-opacity" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                    <path d="M6 3l5 5-5 5" />
+                  </svg>
+                </button>
+              ))}
+            </div>
+            <div className="px-6 py-4 border-t border-border-light flex justify-end">
+              <button onClick={() => setRewindConfirm(null)} className="px-4 py-2 text-sm text-content-secondary glass-option-hover rounded-lg transition-colors cursor-pointer border border-white/40">
+                {t(lang, 'cancel')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 单个会话删除确认（侧边栏会话项操作菜单触发）：
+          自定义 React 模态替代原生 window.confirm，避免 Electron 桌面壳中
+          原生对话框关闭后遗留的焦点异常导致后续输入框无法聚焦 */}
+      {deleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/35 backdrop-blur-md animate-fade-in" onClick={handleCancelDeleteOne} />
+          <div className="relative bg-surface-card rounded-2xl border border-border-light shadow-card w-[380px] flex flex-col animate-scale-in modal-origin-center">
+            <div className="px-6 py-4">
+              <h3 className="text-lg font-semibold text-content-primary">{t(lang, 'delete_session')}</h3>
+            </div>
+            <div className="px-6 py-4">
+              <p className="text-sm text-content-secondary leading-relaxed">{t(lang, 'confirm_delete_session')}</p>
+            </div>
+            <div className="px-6 py-4 flex justify-end gap-2">
+              <button ref={deleteCancelRef} onClick={handleCancelDeleteOne} className="px-4 py-2 text-sm text-content-secondary glass-option-hover rounded-lg transition-colors cursor-pointer border border-white/40">
+                {t(lang, 'cancel')}
+              </button>
+              {/* 确认按钮不自动聚焦：焦点由上方 effect 移至"取消"，Enter 触发的是安全动作 */}
+              <button onClick={handleConfirmDeleteOne}
+                className="px-4 py-2 text-sm text-white bg-danger hover:bg-danger-hover rounded-lg transition-colors cursor-pointer">
+                {t(lang, 'confirm_delete')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 自定义文本输入模态框（/rename 分支） */}
+      {customInputModal && (
+        <CustomInputModal
+          lang={lang}
+          prompt={customInputModal.prompt}
+          invalidMessage={customInputModal.invalidMessage}
+          mode="text"
+          onSubmit={handleCustomSubmit}
+          onCancel={handleCustomCancel}
+        />
+      )}
+
+      {/* 设置配置表单（首次登录自动弹出，或点击左栏 settings 齿轮触发；
+          agent 创建/管理/模型设置由"代理"标签页承担） */}
+      {showSetupForm && (
+        <SetupForm
+          lang={lang}
+          firstLogin={session.firstLogin}
+          initialTab={setupInitialTab}
+          workspaces={session.workspaces}
+          onAddWorkspace={session.addWorkspace}
+          onRemoveWorkspace={session.removeWorkspace}
+          onRequestWorkspaces={session.requestWorkspaces}
+          onSetDefaultWorkspace={(path) => {
+            // 默认目录 = settings.working_directory（REST PATCH，语义保留）
+            settingsApi.updateWorkingDirectory(path)
+              .then(() => session.requestWorkspaces())
+              .catch(() => undefined);
+          }}
+          onSetUiLanguage={handleSetUiLanguage}
+          agentsApi={{
+            catalog: session.agentCatalog,
+            loading: session.agentCatalogLoading,
+            opResult: session.agentOpResult,
+            tools: session.agentWizardTools,
+            models: session.agentWizardModels,
+            generated: session.agentGenerated,
+            generateLoading: session.agentGenerateLoading,
+            generateError: session.agentGenerateError,
+            wizardResult: session.agentWizardResult,
+            requestAgents: session.requestAgents,
+            updateAgent: session.updateAgent,
+            deleteAgent: session.deleteAgent,
+            clearOpResult: session.clearAgentOpResult,
+            wizardInit: session.sendAgentWizardInit,
+            wizardGenerate: session.sendAgentGenerateRequest,
+            wizardSubmit: session.sendAgentWizardSubmit,
+            clearWizardState: session.clearAgentWizardState,
+          }}
+          defaultWorkspace={session.sessions.find((s) => s.active)?.cwd}
+          onSaved={handleSetupSaved}
+          onClose={handleCloseSetupForm}
+        />
+      )}
+
+      {/* Toast 通知 */}
+      {toastMessage && (
+        <div
+          key={toastKeyRef.current}
+          className={`fixed bottom-8 right-6 z-50 ${toastExiting ? 'animate-toast-out' : 'animate-toast-in'}`}
+          onMouseEnter={handleToastMouseEnter} onMouseLeave={handleToastMouseLeave}
+        >
+          <div className="glass-surface border border-black/10 rounded-2xl max-w-[360px] overflow-hidden relative">
+            {/* 滚动容器全宽：右 padding 只是内容让位区（不改变滚动条位置），
+                因此滚动条始终贴卡片最右侧；关闭按钮绝对定位悬浮于右上角，
+                脱离文档流、不挤占正文与滚动条的任何空间 */}
+            <div className="prose toast-md text-sm text-content-primary leading-relaxed max-h-[60vh] overflow-y-auto pl-5 pr-16 pt-4 pb-3">
+              <ToastMarkdown text={toastMessage.text} />
+            </div>
+            <button onClick={closeToast}
+              className="absolute top-3 right-7 z-10 w-6 h-6 flex items-center justify-center rounded-md text-content-disabled hover:text-content-primary glass-option-hover transition-colors cursor-pointer">
+              <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M2 2l8 8M10 2l-8 8" /></svg>
+            </button>
+            <div className="h-0.5 bg-black/10">
+              <div
+                key={toastKeyRef.current}
+                className={`h-full animate-progress-shrink ${
+                  toastMessage.type === 'error' ? 'bg-danger/80' : toastMessage.type === 'success' ? 'bg-success/80' : 'bg-primary/80'
+                }`}
+                style={{ animationDuration: `${TOAST_DURATION}ms` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 全屏遮罩层：仅覆盖连接未建立 / 首帧引导（首个会话内容未呈现）期间，
+          首个会话内容呈现完成后先播淡出动画再卸载。会话恢复不再走全屏遮罩——
+          由 ChatArea 的局部加载卡承担反馈，侧栏/右栏保持可见可交互，避免切换
+          会话时整屏闪烁。避免"连接 → 欢迎 → 恢复 → 欢迎"的时序翻转在未就绪时
+          露出主界面。 */}
+      {overlayMounted && (
+        <ConnectingOverlay
+          lang={lang}
+          fading={overlayFading}
+          onFaded={handleOverlayFaded}
+          connectionError={session.connectionError}
+          onRetry={handleOverlayRetry}
+        />
+      )}
+      {/* 应用内图片预览（Lightbox）：点击 markdown 图片/图片链接时打开 */}
+      <ImagePreview lang={lang} />
+      {/* 文件预览弹窗：停靠列"弹窗查看"按钮触发放大形态；关闭返回停靠列 */}
+      <FileViewerModal
+        lang={lang}
+        payload={previewPopOut ? session.filePreview : null}
+        loading={session.filePreviewLoading}
+        onClose={() => setPreviewPopOut(false)} />
+    </div>
+  );
+}
+
+/** 删除弹窗中的单个目录分组（可展开/关闭；会话项保持缩进；右侧整组删除） */
+function DeleteGroupSection({ group, deleteSelected, onToggleItem, onDeleteGroup, lang }: {
+  group: { cwd: string; name: string; sessions: { value: string; label: string }[] };
+  deleteSelected: Set<string>;
+  onToggleItem: (v: string) => void;
+  onDeleteGroup: (g: { cwd: string; name: string; sessions: { value: string; label: string }[] }) => void;
+  lang: UiLanguage;
+}) {
+  const [open, setOpen] = useState(true);
+
+  return (
+    <div className="mb-1">
+      {/* 组头：点击切换展开/关闭；右侧整组删除按钮独立（不触发展开）。
+          卡片尺寸（py-2）与会话项一致；文件图标起点 36px（px-4 + chevron 12px + gap-2 8px） */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((v) => !v); } }}
+        className="flex items-center gap-2 px-4 py-2 cursor-pointer glass-option-hover transition-colors rounded-lg"
+        title={group.cwd}
+      >
+        {/* 展开指示（旋转） */}
+        <svg className={`w-3 h-3 shrink-0 text-content-secondary transition-transform duration-150 ${open ? 'rotate-90' : ''}`} viewBox="0 0 16 16" fill="currentColor" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M6 3l5 5-5 5" />
+        </svg>
+        {/* 文件夹双图标（展开=打开文件夹、折叠=关闭文件夹，与侧栏组头一致） */}
+        {open ? <FolderOpenIcon className="w-3.5 h-3.5 shrink-0 text-content-secondary" /> : <FolderClosedIcon className="w-3.5 h-3.5 shrink-0 text-content-secondary" />}
+        <span className="text-sm text-content-secondary truncate flex-1">{group.name}</span>
+        <span className="text-[10px] text-content-disabled tabular-nums shrink-0">{group.sessions.length}</span>
+        <button
+          onClick={(e) => { e.stopPropagation(); onDeleteGroup(group); }}
+          className="text-[11px] text-danger hover:bg-danger/10 rounded-md px-2 py-0.5 transition-colors cursor-pointer shrink-0"
+        >
+          {t(lang, 'delete_group')}
+        </button>
+      </div>
+      {/* 组内会话 checkbox 列表：外层缩进使 checkbox 与组头文件夹图标同列，
+          悬浮背景覆盖选中方框与缩进区 */}
+      {open && (
+        <div className="space-y-0.5 px-2 pl-4">
+          {group.sessions.map((s) => (
+            <label key={s.value} className="flex items-center gap-3 pl-5 pr-3 py-2 cursor-pointer glass-option-hover transition-colors rounded-lg">
+              <input type="checkbox" checked={deleteSelected.has(s.value)} onChange={() => onToggleItem(s.value)} className="w-4 h-4 rounded accent-danger" />
+              <span className="text-sm text-content-secondary truncate flex-1">{s.label}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

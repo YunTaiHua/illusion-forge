@@ -1,0 +1,236 @@
+"""
+团队创建工具
+============
+
+本模块提供 team_create 工具，用于创建多代理协作团队。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from uuid import uuid4
+
+from pydantic import BaseModel, Field
+
+from illusion_forge.state import AppStateStore
+from illusion_forge.swarm.team_helpers import (
+    TEAM_LEAD_NAME,
+    ensure_tasks_dir,
+    get_team_file_path,
+    read_team_file,
+    register_team_for_session_cleanup,
+    reset_task_list,
+    sanitize_name,
+    write_team_file,
+)
+from illusion_forge.tools.base import BaseTool, ToolExecutionContext, ToolResult
+
+
+class TeamCreateToolInput(BaseModel):
+    """team_create 输入参数。"""
+
+    team_name: str = Field(description="Name for the new team to create.")
+    description: str | None = Field(default=None, description="Team description/purpose.")
+    agent_type: str | None = Field(
+        default=None,
+        description=(
+            'Type/role of the team lead (e.g., "researcher", "test-runner"). '
+            "Used for team file and inter-agent coordination."
+        ),
+    )
+
+
+def _generate_unique_team_name(provided_name: str) -> str:
+    """生成唯一团队名（若已存在则回退到随机 slug）。"""
+    if read_team_file(provided_name) is None:
+        return provided_name
+    return f"team-{uuid4().hex[:8]}"
+
+
+class TeamCreateTool(BaseTool[TeamCreateToolInput]):
+    """创建新的多代理团队。"""
+
+    name = "team_create"
+    description = """# TeamCreate
+
+## When to Use
+
+Use this tool proactively whenever:
+- The user explicitly asks to use a team, swarm, or group of agents
+- The user mentions wanting agents to work together, coordinate, or collaborate
+- A task is complex enough that it would benefit from parallel work by multiple agents (e.g., building a full-stack feature with frontend and backend work, refactoring a codebase while keeping tests passing, implementing a multi-step project with research, planning, and coding phases)
+
+When in doubt about whether a task warrants a team, prefer spawning a team.
+
+## Choosing Agent Types for Teammates
+
+When spawning teammates via the Agent tool, choose the `subagent_type` based on what tools the agent needs for its task. Each agent type has a different set of available tools — match the agent to the work:
+
+- **Read-only agents** (e.g., Explore, Plan) cannot edit or write files. Only assign them research, search, or planning tasks. Never assign them implementation work.
+- **Full-capability agents** (e.g., general-purpose) have access to all tools including file editing, writing, and bash. Use these for tasks that require making changes.
+- **Custom agents** defined in `.illusion/agents/` may have their own tool restrictions. Check their descriptions to understand what they can and cannot do.
+
+Always review the agent type descriptions and their available tools listed in the Agent tool prompt before selecting a `subagent_type` for a teammate.
+
+Create a new team to coordinate multiple agents working on a project. Teams have a 1:1 correspondence with task lists (Team = TaskList).
+
+```json
+{
+  "team_name": "my-project",
+  "description": "Working on feature X"
+}
+```
+
+This creates:
+- A team file at `~/.illusion/teams/{team-name}/config.json`
+- A corresponding task list directory at `~/.illusion/data/tasks/{team-name}/`
+
+**Note**: If a team with the same name already exists, a random suffix is appended to ensure uniqueness (e.g., `my-project` may become `team-a1b2c3d4`). The actual name used is returned in the tool output.
+
+## Team Workflow
+
+1. **Create a team** with TeamCreate - this creates both the team and its task list
+2. **Create tasks** using the Task tools (TaskCreate, TaskList, etc.) - they automatically use the team's task list
+3. **Spawn teammates** using the Agent tool with `team_name` and `name` parameters to create teammates that join the team
+4. **Assign tasks** using TaskUpdate with `owner` to give tasks to idle teammates
+5. **Teammates work on assigned tasks** and mark them completed via TaskUpdate
+6. **Teammates go idle between turns** - after each turn, teammates automatically go idle and send a notification. IMPORTANT: Be patient with idle teammates! Don't comment on their idleness until it actually impacts your work.
+7. **Shutdown your team** - when the task is completed, gracefully shut down your teammates via `SendMessage` with a shutdown request, then call TeamDelete.
+
+## Task Ownership
+
+Tasks are assigned using TaskUpdate with the `owner` parameter. Any agent can set or change task ownership via TaskUpdate.
+
+## Automatic Message Delivery
+
+**IMPORTANT**: Messages from teammates are automatically delivered to you. You do NOT need to manually check your inbox.
+
+When you spawn teammates:
+- They will send you messages when they complete tasks or need help
+- These messages appear automatically as new conversation turns (like user messages)
+- If you're busy (mid-turn), messages are queued and delivered when your turn ends
+- The UI shows a brief notification with the sender's name when messages are waiting
+
+Messages will be delivered automatically.
+
+When reporting on teammate messages, you do NOT need to quote the original message—it's already rendered to the user.
+
+## Teammate Idle State
+
+Teammates go idle after every turn—this is completely normal and expected. A teammate going idle immediately after sending you a message does NOT mean they are done or unavailable. Idle simply means they are waiting for input.
+
+- **Idle teammates can receive messages.** Sending a message to an idle teammate wakes them up and they will process it normally.
+- **Idle notifications are automatic.** The system sends an idle notification whenever a teammate's turn ends. You do not need to react to idle notifications unless you want to assign new work or send a follow-up message.
+- **Do not treat idle as an error.** A teammate sending a message and then going idle is the normal flow—they sent their message and are now waiting for a response.
+- **Peer DM visibility.** When a teammate sends a DM to another teammate, a brief summary is included in their idle notification. This gives you visibility into peer collaboration without the full message content. You do not need to respond to these summaries — they are informational.
+
+## Discovering Team Members
+
+Teammates can read the team config file to discover other team members:
+- **Team config location**: `~/.illusion/teams/{team-name}/config.json`
+
+The config file contains a `members` array with each teammate's:
+- `name`: Human-readable name (**always use this** for messaging and task assignment)
+- `agentId`: Unique identifier (for reference only - do not use for communication)
+- `agentType`: Role/type of the agent
+
+**IMPORTANT**: Always refer to teammates by their NAME (e.g., "team-lead", "researcher", "tester"). Names are used for:
+- `to` when sending messages
+- Identifying task owners
+
+Example of reading team config:
+```
+Use the Read tool to read ~/.illusion/teams/{team-name}/config.json
+```
+
+## Task List Coordination
+
+Teams share a task list that all teammates can access at `~/.illusion/data/tasks/{team-name}/`.
+
+Teammates should:
+1. Check TaskList periodically, **especially after completing each task**, to find available work or see newly unblocked tasks
+2. Claim unassigned, unblocked tasks with TaskUpdate (set `owner` to your name). **Prefer tasks in ID order** (lowest ID first) when multiple tasks are available, as earlier tasks often set up context for later ones
+3. Create new tasks with `TaskCreate` when identifying additional work
+4. Mark tasks as completed with `TaskUpdate` when done, then check TaskList for next work
+5. Coordinate with other teammates by reading the task list status
+6. If all available tasks are blocked, notify the team lead or help resolve blocking tasks
+
+**IMPORTANT notes for communication with your team**:
+- Do not use terminal tools to view your team's activity; always send a message to your teammates (and remember, refer to them by name).
+- Your team cannot hear you if you do not use the SendMessage tool. Always send a message to your teammates if you are responding to them.
+- Do NOT send structured JSON status messages like `{"type":"idle",...}` or `{"type":"task_completed",...}`. Just communicate in plain text when you need to message teammates.
+- Use TaskUpdate to mark tasks completed.
+- If you are an agent in the team, the system will automatically send idle notifications to the team lead when you stop.
+"""
+    input_model = TeamCreateToolInput
+
+    async def execute(self, arguments: TeamCreateToolInput, context: ToolExecutionContext) -> ToolResult:
+        team_name = arguments.team_name.strip()
+        if not team_name:
+            return ToolResult(output="team_name is required for team_create", is_error=True)
+
+        app_state_store = context.metadata.get("app_state_store")
+        if isinstance(app_state_store, AppStateStore):
+            existing_team = app_state_store.get().team_context
+            if isinstance(existing_team, dict) and existing_team.get("teamName"):
+                active_team = str(existing_team["teamName"])
+                return ToolResult(
+                    output=(
+                        f'Already leading team "{active_team}". '
+                        "A leader can only manage one team at a time. "
+                        "Use team_delete to end the current team before creating a new one."
+                    ),
+                    is_error=True,
+                )
+
+        final_team_name = _generate_unique_team_name(team_name)
+        lead_agent_id = f"{TEAM_LEAD_NAME}@{sanitize_name(final_team_name)}"
+        lead_agent_type = arguments.agent_type or TEAM_LEAD_NAME
+        team_file_path = str(get_team_file_path(final_team_name))
+        session_id = str(context.metadata.get("session_id") or "")
+
+        team_file = {
+            "name": final_team_name,
+            "description": arguments.description,
+            "createdAt": int(time.time() * 1000),
+            "leadAgentId": lead_agent_id,
+            "leadSessionId": session_id,
+            "members": [
+                {
+                    "agentId": lead_agent_id,
+                    "name": TEAM_LEAD_NAME,
+                    "agentType": lead_agent_type,
+                    "joinedAt": int(time.time() * 1000),
+                    "tmuxPaneId": "",
+                    "cwd": str(context.cwd),
+                    "subscriptions": [],
+                }
+            ],
+        }
+
+        write_team_file(final_team_name, team_file)
+        register_team_for_session_cleanup(final_team_name)
+
+        task_list_id = sanitize_name(final_team_name)
+        reset_task_list(task_list_id)
+        ensure_tasks_dir(task_list_id)
+        os.environ["ILLUSION_TASK_LIST_ID"] = task_list_id
+
+        if isinstance(app_state_store, AppStateStore):
+            app_state_store.set(
+                team_context={
+                    "teamName": final_team_name,
+                    "teamFilePath": team_file_path,
+                    "leadAgentId": lead_agent_id,
+                }
+            )
+
+        output = {
+            "team_name": final_team_name,
+            "team_file_path": team_file_path,
+            "lead_agent_id": lead_agent_id,
+        }
+        return ToolResult(output=json.dumps(output, ensure_ascii=False))
+

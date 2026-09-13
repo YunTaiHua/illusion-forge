@@ -1,0 +1,109 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "illusion-forge"
+version = "0.4.14"
+description = "AI-driven CAD workbench and coding agent for Windows, evolved from illusion-agent: web UI, Electron desktop shell and a SolidWorks-connected modeling canvas."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "YunTaiHua", email = "3597489498@qq.com" },
+]
+keywords = ["ai", "agent", "cad", "solidworks", "workbench", "coding-agent", "llm", "desktop", "windows"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Manufacturing",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "aiofiles>=24.1.0",
+    "anthropic>=0.40.0",
+    "openai>=1.59.0",
+    "typer>=0.12.0",
+    "pydantic>=2.0.0",
+    "httpx>=0.27.0",
+    "truststore>=0.10.0",
+    "websockets>=12.0",
+    "mcp>=2.0.0",
+    "pyperclip>=1.9.0",
+    "pyyaml>=6.0",
+    "watchfiles>=0.20.0",
+    "croniter>=2.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "packaging>=23.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "Pillow>=10.0.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+    "types-aiofiles>=24.1.0",
+]
+feishu = [
+    "lark-oapi>=1.4.0",
+]
+weixin = [
+    "aiohttp>=3.9.0",
+    "cryptography>=42.0.0",
+    "qrcode>=7.4.0",
+]
+all = [
+    "illusion-forge[feishu,weixin]",
+]
+
+[project.scripts]
+illusion-forge = "illusion_forge.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/YunTaiHua/illusion-forge"
+Repository = "https://github.com/YunTaiHua/illusion-forge"
+Issues = "https://github.com/YunTaiHua/illusion-forge/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/illusion_forge"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"frontend/web/dist" = "illusion_forge/_web_dist"
+
+[tool.hatch.build.hooks.custom]
+path = "scripts/hatch_build.py"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "--capture=sys"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[[tool.mypy.overrides]]
+module = "lark_oapi.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "aiofiles.*"
+ignore_missing_imports = true

@@ -1,0 +1,46 @@
+name: Release Desktop
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release-desktop:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Build web frontend
+        run: |
+          cd frontend/web
+          npm install --no-fund --no-audit
+          npm run build
+
+      - name: Build desktop (fetch runtimes + install backend + icons + dist)
+        env:
+          PYTHONIOENCODING: utf-8
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/build_desktop.py --all
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            desktop/release/*.exe
+            desktop/release/latest*.yml
+            desktop/release/*.blockmap

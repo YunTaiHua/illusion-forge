@@ -1,0 +1,1286 @@
+/* 嵌入字体（Inter 正文 / JetBrains Mono 等宽 / Playfair Display 展示衬线），
+   随前端一起打包，不依赖系统安装；Playfair 用于顶栏品牌标语（700 欢迎屏同款 / 900 加粗） */
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+@import '@fontsource/inter/700.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import '@fontsource/playfair-display/700.css';
+@import '@fontsource/playfair-display/900.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 内容区文本可选但不显示 I-beam 光标 */
+.select-text {
+  cursor: default;
+}
+
+/* 隐藏 number 输入框的步进箭头，仅保留手动输入 */
+.no-spinner::-webkit-outer-spin-button,
+.no-spinner::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.no-spinner {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+:root {
+  /* 主色 - 青绿色系 (清新风格) */
+  --primary: #2a9d99;
+  --primary-hover: #238b87;
+  --primary-light: rgba(42, 157, 153, 0.1);
+
+  /* 辅助色 - 淡紫色 */
+  --secondary: #7c6fb0;
+
+  /* 强调色 - 珊瑚橙 */
+  --accent: #e8856c;
+
+  /* 语义色 */
+  --success: #4caf7d;
+  --warning: #e8a84c;
+  --error: #d45b5b;
+  /* 信息色 - 蓝色 */
+  --info-color: #3b82f6;
+
+  /* 背景色 - 清新白 */
+  --bg-main: #ffffff;
+  --bg-card: #ffffff;
+  --bg-card-alt: #f7f8fa;
+  --bg-hover: #eef0f4;
+  --bg-input: #ffffff;
+
+  /* 边框色 - 蓝灰调 */
+  --border-light: #e8ebf0;
+  --border-medium: #d0d5e0;
+
+  /* 文本色 - 深灰 */
+  --text-primary: #1a1d23;
+  --text-secondary: #4a5068;
+  --text-disabled: #8b92a8;
+
+  /* 滚动条滑块：浅色下比 --border-medium 更深一档，保证可见性 */
+  --scrollbar-thumb: #aab2c0;
+  --scrollbar-thumb-hover: #8c96a6;
+
+  /* 轮次导航刻度：已载入比未载入深一档，均为主色高亮的弱对比底色 */
+  --nav-tick-loaded: #b6bdc9;
+  --nav-tick-unloaded: #d4d9e2;
+
+  /* 粉彩色块 */
+  --pastel-mint: #d4f5e0;
+  --pastel-lilac: #e8dff5;
+  --pastel-cream: #fef7e6;
+  --pastel-pink: #fde0e8;
+  --pastel-sky: #dcecfa;
+  --pastel-coral: #fde0d4;
+
+  /* ========== 玻璃拟态 token (macOS 风柔和玻璃) ========== */
+  --glass-bg:         rgba(255, 255, 255, 0.58);   /* 弹出/卡片/toast 主用 */
+  --glass-bg-panel:   rgba(255, 255, 255, 0.5);    /* 大面板（侧栏/工具栏），让灰底透出更明显 */
+  --glass-bg-overlay: rgba(255, 255, 255, 0.72);   /* 居中大弹窗，对比更强 */
+  --glass-blur:         20px;
+  --glass-blur-panel:   16px;
+  --glass-blur-overlay: 28px;
+  --glass-saturate:     1.8;
+  --glass-border:        rgba(255, 255, 255, 0.6);
+  --glass-border-strong: rgba(42, 157, 153, 0.18);
+  --glass-shadow: 0 8px 32px rgba(31, 38, 135, 0.12), 0 2px 8px rgba(31, 38, 135, 0.08);
+  --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+
+  /* 会话项状态样式（浅色版：青蓝色系，与深色版同构的明暗层次）
+   * 层次：流动光束（饱和实色）> 活跃边框（中）> 常驻轨道（淡），
+   * 避免浅底上三者都是深色线导致的低区分度 */
+  --session-active-bg: rgba(42, 157, 153, 0.13);
+  --session-active-border: rgba(8, 145, 178, 0.5);
+  --beam-track: rgba(8, 145, 178, 0.22);
+  --beam-color-a: #0891b2;
+  --beam-color-b: #6366f1;
+
+  /* 小圆 badge 背景（count/tag 胶囊，右栏区块与单轮变更条共用）—
+     浅色下半透明白不可辨，用淡墨底保证可读 */
+  --badge-bg-subtle: rgba(15, 23, 42, 0.07);
+
+  /* 聊天内容列与输入框卡片宽度：输入框卡片比聊天区每边宽约 17px，圆角错开避免遮盖 */
+  --chat-content-width: 896px;
+  --composer-card-max-width: calc(var(--chat-content-width) + 34px);
+
+  /* 行内代码背景：浅色下比聊天背景(#e9ecf2)更深一档，清晰可辨 */
+  --inline-code-bg: #d5dce6;
+}
+
+/* ========== 深色模式变量覆盖 ========== */
+:root.dark {
+  /* 语义色（深色模式下略微提亮以保持对比度） */
+  --primary: #3dbab5;
+  --primary-hover: #4cc8c3;
+  --primary-light: rgba(61, 186, 181, 0.14);
+  --secondary: #9d8fc8;
+  --accent: #f0997f;
+
+  --success: #5ec48f;
+  --warning: #f0b85c;
+  --error: #e87474;
+  --info-color: #60a5fa;
+
+  /* 背景色 - 深色基底（中性灰黑，不偏蓝） */
+  --bg-main: #1b1b1f;
+  --bg-card: #222227;
+  --bg-card-alt: #28282e;
+  --bg-hover: #303036;
+  --bg-input: #1b1b1f;
+
+  /* 边框色 */
+  --border-light: #303036;
+  --border-medium: #3c3c44;
+
+  /* 文本色 - 浅色 */
+  --text-primary: #eaeaea;
+  --text-secondary: #a3a3ab;
+  --text-disabled: #5d5d66;
+
+  /* 滚动条滑块：深色下保持与边框相近但略亮，清晰可辨 */
+  --scrollbar-thumb: #3c3c44;
+  --scrollbar-thumb-hover: #4c4c55;
+
+  /* 轮次导航刻度：深色下已载入比未载入亮一档，保持可见性 */
+  --nav-tick-loaded: #56565f;
+  --nav-tick-unloaded: #3a3a43;
+
+  /* 粉彩色块（深色模式下降低饱和度、提高亮度以适配深底） */
+  --pastel-mint: #2a4a3a;
+  --pastel-lilac: #3a3450;
+  --pastel-cream: #3d3825;
+  --pastel-pink: #3d2832;
+  --pastel-sky: #283548;
+  --pastel-coral: #3d2e25;
+
+  /* 玻璃拟态 token（深色版：半透明中性深灰底 + 更强模糊） */
+  --glass-bg:         rgba(34, 34, 39, 0.62);
+  --glass-bg-panel:   rgba(27, 27, 31, 0.55);
+  --glass-bg-overlay: rgba(40, 40, 46, 0.78);
+  --glass-blur:         22px;
+  --glass-blur-panel:   18px;
+  --glass-blur-overlay: 30px;
+  --glass-saturate:     1.6;
+  --glass-border:        rgba(255, 255, 255, 0.08);
+  --glass-border-strong: rgba(61, 186, 181, 0.22);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.3);
+  --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+
+  /* 会话项状态样式（深色版） */
+  --session-active-border: rgba(61, 186, 181, 0.35);
+  --beam-track: rgba(61, 186, 181, 0.22);
+  --beam-color-a: #66d9e8;
+  --beam-color-b: #a29bfe;
+
+  /* badge 背景：深色模式下改为深色半透明，让亮色文字（primary/secondary）清晰可读 */
+  --badge-bg-subtle: rgba(255, 255, 255, 0.08);
+
+  /* 行内代码背景：深色下保留 hover 背景 */
+  --inline-code-bg: var(--bg-hover);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+/* 强制表单元素使用主题色，覆盖浏览器深色模式默认样式 */
+input, textarea, select {
+  color-scheme: light;
+}
+
+html {
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+body {
+  font-family: 'Inter', 'Inter Fallback', system-ui, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-feature-settings: 'cv01', 'ss01', 'ss03';
+  /* 简约高级：冷灰底 + 左上→右下轻微线性渐变（单层渐变，无 radial 双层交叠的断层感）。
+     浅色高光用微亮灰白而非纯白，与玻璃边栏（半透明白）保持可辨对比 */
+  background-color: var(--body-bg, #e9ecf2);
+  background-image: linear-gradient(135deg,
+    var(--body-bg-highlight, #f5f6f9) 0%,
+    var(--body-bg, #e9ecf2) 45%,
+    var(--body-bg-shadow, #cbd1dc) 100%);
+  background-attachment: fixed;
+  color: var(--text-primary);
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+/* 深色模式 body 背景（合并到上方 :root.dark 块的补充变量） */
+:root.dark {
+  --body-bg: #161618;
+  /* 色差拉开（左上 #26262c / 右下 #0e0e11），单层线性渐变平滑无断层 */
+  --body-bg-highlight: #26262c;
+  --body-bg-shadow: #0e0e11;
+  --code-header-bg: #28282e;
+  --code-block-bg: #18181c;
+  /* 玻璃交互态（深色版：浅色半透明叠加在深底上） */
+  --glass-option-hover-bg: rgba(255, 255, 255, 0.06);
+  --glass-option-active-bg: rgba(255, 255, 255, 0.09);
+  --glass-option-active-border: rgba(255, 255, 255, 0.12);
+  /* 已选中项悬浮时的底色：比选中底色更亮一档，保证悬浮反馈可见 */
+  --glass-option-active-hover-bg: rgba(255, 255, 255, 0.13);
+  --glass-highlight-color: rgba(255, 255, 255, 0.06);
+  --glass-shadow-soft: rgba(0, 0, 0, 0.25);
+  --pill-bg: rgba(255, 255, 255, 0.06);
+  --pill-border: rgba(255, 255, 255, 0.1);
+  --pill-hover-bg: rgba(255, 255, 255, 0.1);
+  --pill-hover-border: rgba(255, 255, 255, 0.16);
+  --danger-hover: #e5484d;
+}
+
+/* ========== 代码块样式 ========== */
+/* 代码块外层包裹 */
+.code-block-wrap {
+  position: relative;
+  margin: 1.5em 0;
+}
+/* 代码块顶栏 — 语言名 + 复制按钮 */
+.code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  background: var(--code-header-bg, #f0f1f4);
+  border: 0.5px solid var(--border-light);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+}
+.code-lang-label {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 13px;
+  color: var(--text-secondary);
+  user-select: none;
+}
+/* 复制按钮 */
+.code-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-disabled);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.code-copy-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+.code-copy-btn svg {
+  width: 14px;
+  height: 14px;
+}
+.code-copy-btn .copy-check {
+  display: none;
+}
+.code-copy-btn.copied .copy-icon {
+  display: none;
+}
+.code-copy-btn.copied .copy-check {
+  display: inline-flex;
+}
+/* 外层 <pre> 容器 */
+.prose pre {
+  border-radius: 0 0 6px 6px;
+  border: 0.5px solid var(--border-light);
+  border-top: none;
+  background: var(--code-block-bg, #f8f9fb);
+  margin: 0;
+  overflow: auto;
+  padding: 8px 12px;
+}
+/* 独立代码块（无顶栏时恢复完整圆角） */
+.code-block-wrap > pre:only-child {
+  border-radius: 6px;
+  border-top: 0.5px solid var(--border-light);
+}
+.prose pre::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.prose pre::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb, var(--border-medium));
+  border-radius: 3px;
+}
+
+/* <pre> 内的 <code> — 继承容器背景，只负责排版 */
+.prose pre code {
+  background: transparent;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  color: var(--text-primary);
+}
+
+/* hljs 语法高亮元素 — 仅着色，不设边框/背景/圆角 */
+pre code.hljs,
+.prose pre code.hljs {
+  background: transparent;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  display: block;
+  overflow-x: auto;
+}
+
+/* diff 新增/删除：只保留字体颜色（语义变量，明暗自适应），去掉整块背景色 */
+.hljs-addition,
+.hljs-deletion {
+  background-color: transparent;
+}
+.hljs-addition {
+  color: var(--success);
+}
+.hljs-deletion {
+  color: var(--error);
+}
+/* diff 代码块块头（@@ / +++ / ---）颜色与工具结果 diff 一致（diff 语言别名 patch 同样覆盖） */
+.prose pre code.language-diff .hljs-meta,
+.prose pre code.language-patch .hljs-meta {
+  color: var(--info-color);
+}
+
+/* 工具结果 diff 行着色（web 端 edit 工具结果按新增/删除/块头着色，
+   颜色走语义变量，自动适配明暗主题） */
+.text-diff-add { color: var(--success); }
+.text-diff-del { color: var(--error); }
+.text-diff-hunk { color: var(--info-color); }
+
+/* ========== 文件预览滚动容器 ==========
+   稍粗的滚动条便于鼠标拖动；纵向轨道背景与行号列（--bg-card）一致，
+   视觉上成为行号区的自然延伸；轨道不过宽（8px）。 */
+.preview-scroll { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb, var(--border-medium)) var(--bg-card, transparent); }
+.preview-scroll::-webkit-scrollbar { width: 8px; height: 10px; }
+.preview-scroll::-webkit-scrollbar-track { background: var(--bg-card, transparent); }
+.preview-scroll::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb, var(--border-medium));
+  border-radius: 4px;
+  border: 1.5px solid transparent;
+  background-clip: content-box;
+}
+.preview-scroll::-webkit-scrollbar-thumb:hover { background-color: var(--text-secondary, #999); background-clip: content-box; }
+.preview-scroll::-webkit-scrollbar-corner { background: var(--bg-card, transparent); }
+
+/* 主聊天区滚动条：顶部活动范围截断（132px），与右栏折叠时的顶部按钮区不重叠。
+   132 与按钮列几何绑定（3×32 + 2×8 间隙 + top-3 12 + 呼吸 8），改按钮需同步。
+   注意：::-webkit-scrollbar-track 仅 Chromium 生效（Electron/Chromium 可接受）。 */
+.chat-scroll-cap::-webkit-scrollbar-track {
+  margin-top: 132px;
+}
+
+/* ========== 暗色模式代码高亮覆盖 ==========
+   基础主题是 highlight.js 的 github.css（浅色配色，如 #0550ae 深蓝），
+   在深色背景上对比度严重不足（注释/字符串/数字几乎融入背景）。
+   这里按 GitHub Dark 配色整体覆盖，保证暗色主题下代码可读性。 */
+:root.dark .hljs {
+  color: #e6edf3;
+}
+
+/* 注释 / 引用：浅灰蓝，避免深蓝融入背景 */
+:root.dark .hljs-comment,
+:root.dark .hljs-quote {
+  color: #8b949e;
+  font-style: italic;
+}
+
+/* 关键字 / 标签 / 指令：暖红 */
+:root.dark .hljs-keyword,
+:root.dark .hljs-selector-tag,
+:root.dark .hljs-doctag,
+:root.dark .hljs-meta .hljs-keyword {
+  color: #ff7b72;
+}
+
+/* 字符串 / 正则 / 新增：浅蓝 */
+:root.dark .hljs-string,
+:root.dark .hljs-regexp,
+:root.dark .hljs-meta .hljs-string {
+  color: #a5d6ff;
+}
+
+/* f-string / 模板字符串插值 {expr}：亮灰。
+   必须覆盖：浅色主题 github.css 中 .hljs-subst 为深黑 #24292e，
+   深色模式下会与代码块背景融为一体不可见。 */
+:root.dark .hljs-subst {
+  color: #c9d1d9;
+}
+
+/* 标题 / 函数名 / 类名：淡紫 */
+:root.dark .hljs-title,
+:root.dark .hljs-title.function_,
+:root.dark .hljs-title.class_,
+:root.dark .hljs-section,
+:root.dark .hljs-selector-id {
+  color: #d2a8ff;
+}
+
+/* 数字 / 字面量 / 类型 / 变量：亮蓝（替代深蓝 #0550ae） */
+:root.dark .hljs-number,
+:root.dark .hljs-literal,
+:root.dark .hljs-symbol,
+:root.dark .hljs-type,
+:root.dark .hljs-variable,
+:root.dark .hljs-template-variable,
+:root.dark .hljs-attr,
+:root.dark .hljs-attribute {
+  color: #79c0ff;
+}
+
+/* 内置函数 / 属性名 / 选择器：橙 */
+:root.dark .hljs-built_in,
+:root.dark .hljs-name,
+:root.dark .hljs-selector-class,
+:root.dark .hljs-selector-attr,
+:root.dark .hljs-selector-pseudo {
+  color: #ffa657;
+}
+
+/* 元信息 / 标签 / 链接 / 项目符号：亮蓝 */
+:root.dark .hljs-meta,
+:root.dark .hljs-tag,
+:root.dark .hljs-link,
+:root.dark .hljs-bullet {
+  color: #79c0ff;
+}
+
+/* 斜体 / 加粗（Markdown 的 *xx* / **xx**，含文件预览 hljs 标记）：
+   基主题 github.css 对这两类 token 显式赋予浅色近黑 #24292e，深色下若不覆盖
+   会与深底融为一体完全看不清，故显式复写为主文本色，保证 *斜体* 与 **加粗**
+   在深色主题下清晰可辨。 */
+:root.dark .hljs-emphasis {
+  color: var(--text-primary);
+  font-style: italic;
+}
+
+:root.dark .hljs-strong {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+/* 未覆盖的默认 token（punctuation 等）继承 code 前景色 */
+:root.dark code.hljs,
+:root.dark .prose pre code.hljs {
+  color: var(--text-primary);
+}
+
+/* 行内代码：常规字体、主题文字色、浅灰蓝背景（浅色下与聊天背景区分，深色保留 hover 背景） */
+.prose code {
+  background: var(--inline-code-bg);
+  padding: 0 5px;
+  border-radius: 6px;
+  font-size: 0.875em;
+  color: var(--text-primary);
+  font-weight: 400;
+}
+
+.prose code::before,
+.prose code::after {
+  content: '' !important;
+}
+
+/* 标题内的行内代码继承标题字号 */
+.prose h1 code,
+.prose h2 code,
+.prose h3 code,
+.prose h4 code {
+  font-size: inherit;
+  color: inherit;
+  font-weight: inherit;
+}
+
+/* 左栏折叠态：工作台画布顶栏整体隐藏——返回对话/新建/添加卡片由
+   SidebarControls 悬浮按钮列接管（含折叠态专用的"添加卡片"按钮），
+   画布左上角只保留按钮列，不再出现两套控件的几何竞争。 */
+.sidebar-collapsed .canvas-topbar {
+  display: none;
+}
+
+/* 工作台对话卡（440px 窄卡）限定：长内联代码/长串强制断行，不撑破卡片。
+   仅作用于 [wb-conversation-card] 祖先内（工作台对话面板），chat 宽栏不受影响。
+   背景说明：MessageBubble 的部分 prose 容器未带 [overflow-wrap:anywhere]，
+   窄卡里超长无空格串（如内联代码）会横向溢出，这里按作用域兜底。 */
+.wb-conversation-card .prose {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.wb-conversation-card .prose :not(pre) > code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+}
+
+/* 围栏代码块（```）：flex 子项默认 min-width:auto，超长代码行的最小内容宽度
+   会把整条消息列顶到比卡片还宽（pre 自身的 overflow:auto 因此失效）。
+   卡片作用域内强制所有 flex 子项可收缩到 0，宽度链被卡住后 pre 在块内横向滚动。 */
+.wb-conversation-card .flex > * {
+  min-width: 0;
+}
+
+.wb-conversation-card .code-block-wrap {
+  max-width: 100%;
+}
+
+/* 轮次导航条浮层化：ChatArea 里它是 flex 实体列（40px + 滚动容器 mr-1.5），
+   在 440px 窄卡里双重挤压消息宽度。卡片作用域内把它从文档流摘出、贴左缘
+   悬浮，并收窄到 20px（消息文本左缘在卡内 24px，20px 刻度带不遮正文）；
+   空态占位（w-[40px] 的同款类组合）一并覆盖。chat 宽栏不受影响。 */
+.wb-conversation-card [class~="relative"][class~="self-stretch"] {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 20px;
+  z-index: 10;
+}
+
+.wb-conversation-card [class~="self-stretch"] > .relative {
+  width: 100% !important;
+  padding-left: 2px;
+  padding-right: 2px;
+}
+
+/* 滚动条浮层化：去掉滚动容器的右距与 scrollbar-gutter 预留（内联
+   style 需 !important 覆盖），并隐藏竖向滚动条——滚轮/触控板滚动不受影响。
+   仅作用在工作台对话卡内。 */
+.wb-conversation-card .chat-scroll-cap {
+  margin-right: 0;
+  scrollbar-gutter: auto !important;
+  scrollbar-width: none;
+}
+
+.wb-conversation-card .chat-scroll-cap::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* 上标样式 */
+.prose sup {
+  font-size: 0.75em;
+  vertical-align: super;
+  line-height: 0;
+}
+
+/* ========== 表格样式 ========== */
+.prose table {
+  width: auto;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.875rem;
+  margin: 1em 0;
+  border: 1px solid var(--border-medium);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.prose thead {
+  background: var(--bg-card-alt);
+}
+
+.prose th,
+.prose th[align] {
+  padding: 0.5rem 0.75rem;
+  text-align: center !important;
+  font-weight: 600;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-medium);
+  border-right: 1px solid var(--border-medium);
+  font-size: 0.8125rem;
+}
+
+.prose th:last-child {
+  border-right: none;
+}
+
+.prose td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border-medium);
+  border-right: 1px solid var(--border-medium);
+  color: var(--text-secondary);
+}
+
+.prose td:last-child {
+  border-right: none;
+}
+
+.prose tbody tr:hover {
+  background: var(--primary-light);
+}
+
+.prose tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* ========== 引用块（简洁竖线样式，竖杠保留当前颜色） ========== */
+.prose blockquote {
+  border-left: 3px solid var(--primary);
+  padding: 0.375em 0 0.375em 1.25em;
+  margin: 1em 0;
+}
+
+.prose blockquote p {
+  margin: 0;
+}
+
+.prose blockquote p + p {
+  margin-top: 0.5em;
+}
+
+/* 引用块内列表 */
+.prose blockquote ul,
+.prose blockquote ol {
+  margin: 0.375em 0;
+  padding-left: 1.25em;
+}
+
+.prose blockquote li {
+  margin: 0.25em 0;
+}
+
+/* ========== 列表样式 ========== */
+.prose ul,
+.prose ol {
+  padding-left: 1.5em;
+  margin: 0.5em 0;
+  list-style-type: disc;
+}
+
+.prose ol {
+  list-style-type: decimal;
+}
+
+.prose li {
+  margin: 0.25em 0;
+  color: var(--text-primary);
+}
+
+.prose li::marker {
+  color: var(--primary);
+  font-size: 0.85em;
+}
+
+/* 嵌套列表用圆圈 */
+.prose ul ul {
+  list-style-type: circle;
+}
+
+.prose ul ul ul {
+  list-style-type: square;
+}
+
+/* ========== 链接样式 ========== */
+.prose a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.prose a:hover {
+  color: var(--primary-hover);
+}
+
+/* ========== 分割线 ========== */
+.prose hr {
+  border: none;
+  /* 浅色主题与"任务完成"折叠区分隔线（--border-medium）同色 */
+  border-top: 1px solid var(--border-medium);
+  margin: 1.5em 0;
+}
+
+/* 深色主题保持原分隔线颜色 */
+:root.dark .prose hr {
+  border-top-color: var(--border-light);
+}
+
+/* ========== 标题样式 ========== */
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4 {
+  color: var(--text-primary);
+  font-weight: 700;
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+}
+
+/* 浅色主题标题下划线与 hr/"任务完成"分隔线同色（--border-medium），深色保持 --border-light */
+.prose h1 { font-size: 1.5em; border-bottom: 2px solid var(--border-medium); padding-bottom: 0.3em; }
+.prose h2 { font-size: 1.25em; border-bottom: 1px solid var(--border-medium); padding-bottom: 0.3em; }
+.prose h3 { font-size: 1.125em; }
+
+:root.dark .prose h1,
+:root.dark .prose h2 {
+  border-bottom-color: var(--border-light);
+}
+
+/* ========== 图片 ========== */
+.prose img {
+  max-width: 100%;
+  border-radius: 8px;
+  margin: 1em 0;
+  border: 1px solid var(--border-light);
+}
+
+/* ========== Markdown 内容字体 ========== */
+.prose {
+  font-size: 1rem;
+  line-height: 1.8;
+  font-family: 'Inter', sans-serif;
+  color: var(--text-primary);
+}
+
+/* ========== 滚动条样式 ========== */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb, var(--border-medium));
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover, var(--text-disabled));
+}
+
+/* ========== 选中文本样式 ========== */
+::selection {
+  background: var(--primary-light);
+  color: var(--text-primary);
+}
+
+/* ========== 焦点样式 ==========
+ * 移除全局绿色 outline 边框（视觉突兀），改为透明 outline 仅保留无障碍语义；
+ * 具体交互元素（输入框/下拉触发器）通过各自的 focus:shadow-glow 实现柔和散光聚焦态，
+ * 与底部输入框风格统一。
+ */
+*:focus-visible {
+  outline: none;
+}
+
+/* ========== Electron 桌面壳自定义顶部栏拖拽区 ========== */
+.app-region-drag {
+  -webkit-app-region: drag;
+}
+.app-region-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* 顶栏：与页面主体同源渐变（fixed 附着，坐标对齐 body），视觉融为一体；无分隔线 */
+.app-titlebar {
+  background-color: var(--body-bg, #e9ecf2);
+  background-image: linear-gradient(135deg,
+    var(--body-bg-highlight, #f5f6f9) 0%,
+    var(--body-bg, #e9ecf2) 45%,
+    var(--body-bg-shadow, #cbd1dc) 100%);
+  background-attachment: fixed;
+}
+
+/* ========== 三栏卡片（左栏/右栏/文件预览） ========== */
+.panel-card {
+  background: var(--bg-card, #ffffff);
+  border: 1px solid var(--border-light, #e8ebf0);
+  border-radius: 12px;
+  /* 单边边距由各栏修饰类控制；顶栏与主区域无缝衔接（顶部无间距），
+     仅底部保留 8px 边距，高度为 100% - 8px 避免溢出被裁 */
+  height: calc(100% - 8px);
+  overflow: hidden;
+}
+/* 左栏：除顶部外留边距（左/下），右侧与聊天区紧贴 */
+.panel-card-sidebar {
+  margin: 0 0 8px 8px;
+}
+/* 右栏/预览：除顶部外留边距（右侧与预览的间隔由右栏右侧 8px 承担，左侧不留） */
+.panel-card-right-stack {
+  margin: 0 8px 8px 0;
+}
+
+/* 文件预览卡：去线框，与其他卡片风格一致 */
+.panel-card.preview-card {
+  border: none;
+}
+
+/* 左栏推入推出动画（内容冻结宽度淡出、列宽滑动裁剪；展开内容淡入） */
+.panel-fading > * {
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+.panel-expanding {
+  animation: panel-wide-in 200ms ease;
+}
+@keyframes panel-wide-in {
+  from { opacity: 0; }
+}
+
+/* ========== 动画 ========== */
+@keyframes pulse-scale {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(0.5); opacity: 0.5; }
+}
+.animate-pulse-scale {
+  animation: pulse-scale 1.2s ease-in-out infinite;
+}
+
+/* 柔和呼吸：scale 1↔1.08，opacity 0.9↔1，用于连接遮罩层莫比乌斯环整体 */
+@keyframes pulse-soft {
+  0%, 100% { transform: scale(1); opacity: 0.9; }
+  50% { transform: scale(1.08); opacity: 1; }
+}
+.animate-pulse-soft {
+  animation: pulse-soft 2.5s ease-in-out infinite;
+}
+
+/* 莫比乌斯环光带流动：stroke-dashoffset 循环 */
+@keyframes mobi-flow {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: -128; }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.animate-blink {
+  animation: blink 0.8s ease-in-out infinite;
+}
+
+/* 更新下载按钮提醒闪烁：opacity 1↔0.35 柔和呼吸，吸引注意但不刺眼；
+   仅可用于 available（可下载）态，安装就绪（downloaded）态不闪烁 */
+@keyframes updater-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.animate-updater-blink {
+  animation: updater-blink 1.4s ease-in-out infinite;
+}
+
+/* ========== 思考过程的 prose-sm 样式 ========== */
+.prose-sm {
+  font-size: 0.875rem;
+  line-height: 1.7;
+}
+
+.prose-sm p {
+  margin: 0.375em 0;
+}
+
+.prose-sm p:first-child {
+  margin-top: 0;
+}
+
+.prose-sm p:last-child {
+  margin-bottom: 0;
+}
+
+.prose-sm code {
+  font-size: 0.95em;
+}
+
+.prose-sm pre {
+  margin: 0;
+}
+
+.prose-sm .code-block-wrap {
+  margin: 0.75em 0;
+}
+
+.prose-sm .code-block-header {
+  padding: 4px 8px;
+}
+
+.prose-sm blockquote {
+  margin: 0.75em 0;
+  padding: 0.625em 0.875em 0.625em 1em;
+}
+
+/* ========== 玻璃拟态语义类 (macOS 风柔和玻璃) ========== */
+
+/* 最常用：弹出菜单 / 卡片 / toast / 命令栏 */
+.glass-surface {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
+}
+
+/* 大面板：左右侧栏 / 底部工具栏容器 */
+.glass-panel {
+  background: var(--glass-bg-panel);
+  backdrop-filter: blur(var(--glass-blur-panel)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-panel)) saturate(var(--glass-saturate));
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-highlight);
+}
+
+/* 居中大弹窗：删除确认等 */
+.glass-overlay {
+  background: var(--glass-bg-overlay);
+  backdrop-filter: blur(var(--glass-blur-overlay)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur-overlay)) saturate(var(--glass-saturate));
+  border: 1px solid var(--glass-border-strong);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
+}
+
+/* 向后兼容别名：现有 .glass-dropdown 自动获得 .glass-surface 质感 */
+.glass-dropdown {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
+}
+
+/* 玻璃面板内可交互项 — hover（白半透明 + 微高光 + 柔和阴影，不含 blur，避免嵌套性能问题） */
+.glass-option-hover:hover {
+  background: var(--glass-option-hover-bg, rgba(255, 255, 255, 0.5));
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight-color, rgba(255, 255, 255, 0.5)),
+    0 2px 8px var(--glass-shadow-soft, rgba(31, 38, 135, 0.1));
+}
+
+/* 玻璃面板内可交互项 — 选中（更白 + 微高光 + 细线框） */
+.glass-option-active {
+  background: var(--glass-option-active-bg, rgba(255, 255, 255, 0.6));
+  border: 1px solid var(--glass-option-active-border, rgba(31, 38, 135, 0.14));
+  box-shadow: inset 0 1px 0 var(--glass-highlight-color, rgba(255, 255, 255, 0.5));
+}
+
+/* 已选中项悬浮态：保持选中底色并轻微提亮。
+   若无此规则，.glass-option-hover:hover（特异性更高）会把选中底色覆盖为更暗的
+   hover 底色，导致已选中选项悬浮时"变暗/无反馈" */
+.glass-option-hover.glass-option-active:hover {
+  background: var(--glass-option-active-hover-bg, rgba(255, 255, 255, 0.68));
+}
+
+/* 键盘导航光标（多选/沙箱单选等"光标与选中态分离"的场景）：细主色描边，
+   用 outline 而非 border/box-shadow，避免与玻璃语义类的边框阴影互相覆盖。
+   首行为不支持 color-mix 的旧浏览器回退 */
+.kbd-cursor {
+  outline: 1px solid rgba(42, 157, 153, 0.55);
+  outline: 1px solid color-mix(in srgb, var(--primary, #2a9d99) 55%, transparent);
+  outline-offset: -1px;
+}
+
+/* 键盘 Tab 聚焦可见性回退：卡片内按钮禁用了默认 focus outline，
+   用主色细描边替代，保证 Tab 导航位置可见（鼠标点击不触发 :focus-visible） */
+.glass-surface button:focus-visible,
+[data-card-footer] button:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--primary, #2a9d99) 60%, transparent);
+  outline-offset: 1px;
+}
+
+/* ========== 会话项状态样式（react-bits BorderBeam 风格） ========== */
+
+/* 会话项统一预留 1px 透明边框：状态切换时无布局跳动 */
+.session-item {
+  border: 1px solid transparent;
+}
+
+/* 活跃会话（当前查看）：主色淡背景 + 主色细边框，不加重字重 */
+.session-active {
+  background: var(--session-active-bg, var(--primary-light, rgba(42, 157, 153, 0.1)));
+  border-color: var(--session-active-border, rgba(42, 157, 153, 0.28));
+}
+.session-active:hover {
+  /* 悬停时保持活跃态底色（避免被 glass-option-hover 完全覆盖） */
+  background: var(--session-active-bg, var(--primary-light, rgba(42, 157, 153, 0.1)));
+}
+
+/* 运行中会话（busy）：仅一小段主色光束沿边框路径流动，无常驻细边框
+ * ::after 用 conic 渐变 + mask 只保留 1px 环宽；
+ * 环上除流动光束段（柔和主色渐变）外全部透明，
+ * 通过 --beam-angle 旋转实现流动，克制不花哨。
+ * 选中（session-active）的背景色与边框规则与此互不影响，保持原样。 */
+@property --beam-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+.session-running {
+  position: relative;
+}
+.session-running::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--beam-angle) at 50% 50%,
+    transparent 0deg,
+    transparent 300deg,
+    var(--beam-color-a, #2a9d99) 315deg,
+    var(--beam-color-b, #7c6fb0) 345deg,
+    transparent 360deg
+  );
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+  animation: beam-spin 4s linear infinite;
+}
+@keyframes beam-spin {
+  to { --beam-angle: 360deg; }
+}
+
+/* 尊重系统减弱动态效果偏好：光束静止（仍无常驻细边框） */
+@media (prefers-reduced-motion: reduce) {
+  .session-running::after {
+    animation: none;
+  }
+}
+
+/* 工具栏胶囊 — 玻璃面板上的玻璃浮层（明显于纯白渐变） */
+.pill-badge {
+  position: relative;
+  background: var(--pill-bg, rgba(255, 255, 255, 0.55));
+  backdrop-filter: blur(12px) saturate(1.6);
+  -webkit-backdrop-filter: blur(12px) saturate(1.6);
+  border: 1px solid var(--pill-border, rgba(255, 255, 255, 0.6));
+  box-shadow: 0 1px 3px var(--glass-shadow-soft, rgba(31, 38, 135, 0.08)), inset 0 1px 0 var(--glass-highlight-color, rgba(255, 255, 255, 0.7));
+  transition: all 0.2s ease;
+}
+.pill-badge:hover {
+  background: var(--pill-hover-bg, rgba(255, 255, 255, 0.7));
+  border-color: var(--pill-hover-border, rgba(255, 255, 255, 0.8));
+  box-shadow: 0 2px 8px rgba(31, 38, 135, 0.12), inset 0 1px 0 var(--glass-highlight-color, rgba(255, 255, 255, 0.85));
+}
+/* 静态胶囊：禁用 hover 反馈（底色/边框/阴影不变），用于常驻展示型胶囊（如待办面板） */
+.pill-badge-static:hover {
+  background: var(--pill-bg, rgba(255, 255, 255, 0.55));
+  border-color: var(--pill-border, rgba(255, 255, 255, 0.6));
+  box-shadow: 0 1px 3px var(--glass-shadow-soft, rgba(31, 38, 135, 0.08)), inset 0 1px 0 var(--glass-highlight-color, rgba(255, 255, 255, 0.7));
+}
+
+/* 危险操作按钮（删除）— 玻璃化危险态 */
+.danger-action {
+  transition: all 0.2s ease;
+}
+.danger-action:hover {
+  background: rgba(212, 91, 91, 0.1);
+  color: var(--danger-hover, #c34a4a);
+}
+.danger-action:active {
+  transform: scale(0.97);
+}
+
+/* 选项激活态指示 */
+.option-active-indicator {
+  position: relative;
+}
+.option-active-indicator::before {
+  content: '';
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 6px var(--primary-light);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.option-active-indicator.is-active::before {
+  opacity: 1;
+}
+
+/* ========== 动画工具 ========== */
+.modal-origin-center { transform-origin: center; }
+
+/* 下拉菜单隐藏滚动条 */
+.dropdown-scroll::-webkit-scrollbar { display: none; }
+.dropdown-scroll { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* 下拉面板等距内边距 + 选项圆角继承面板；hover 边框由 unlayered 规则统一提供，
+   避免被 glass-option-active 的边框覆盖（与 model/mode 选中项 hover 行为一致） */
+.dropdown-panel { padding: 4px; }
+.dropdown-panel > button { border-radius: inherit; }
+.dropdown-panel > button:hover { border-color: var(--border-light); }
+
+/* ========== 欢迎屏标题样式 ========== */
+
+/* 渐变文字 — GradientText（静态渐变） */
+/* 浅色：群青海岸（U2）——两端群青浅滩向中央沉入深靛海底，
+   品牌青磷光带偏左 41% 不在正中；首尾同色 #2a3d80 保证闪光扫过无缝衔接 */
+.gradient-text {
+  background: linear-gradient(120deg in oklch,
+    #2a3d80 0%,
+    #233257 18%,
+    #263a5e 32%,
+    #2f8f96 38%,
+    #3dbab5 41%,
+    #86d4cf 44%,
+    #3dbab5 47%,
+    #263a5e 66%,
+    #233257 82%,
+    #2a3d80 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+:root.dark .gradient-text {
+  background: linear-gradient(120deg,
+    var(--primary) 0%,
+    var(--secondary) 25%,
+    var(--accent) 40%,
+    rgba(255, 255, 255, 0.65) 50%,
+    var(--accent) 60%,
+    var(--secondary) 75%,
+    var(--primary) 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* 闪光扫过文字 — ShinyText（灰度渐变，静态；鼠标扫过标题时同步扫描）
+   亮带置于渐变 60% 处：静态视野（background-position 0% → 渐变 [0%,50%]）内
+   全部为 --text-disabled 中灰，行尾字母清晰；闪光时亮带才进入视野扫过 */
+.shiny-text {
+  background: linear-gradient(120deg,
+    var(--text-disabled) 0%,
+    var(--text-disabled) 55%,
+    var(--border-light) 60%,
+    var(--text-disabled) 65%,
+    var(--text-disabled) 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* 点击触发的一次性闪光扫描：background-position 从 200% 平移到 0%，
+   恰好平移一个渐变周期（background-repeat 平铺下 200% 与 0% 视觉一致），
+   无缝衔接静态样式且只扫过一轮；主标题/副标题共用同动画同频触发。
+   注：prefers-reduced-motion 下由全局规则降级为 0.01ms 瞬时动画，
+   不使用 animation: none（否则 animationend 不触发，React 状态无法复位） */
+.flash-once {
+  animation: shiny-sweep-once 2.5s ease-in-out;
+}
+@keyframes shiny-sweep-once {
+  0%   { background-position: 200% center; }
+  100% { background-position: 0% center; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  /* 降级：移除 backdrop-filter，保留半透明静态背景（仍有层次） */
+  .glass-surface, .glass-panel, .glass-overlay, .glass-dropdown {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+}
+
+
+/* 隐藏滚动条（右栏内部展开区域，避免布局微动） */
+.scrollbar-hidden {
+  scrollbar-width: none;          /* Firefox */
+  -ms-overflow-style: none;       /* IE/Edge legacy */
+}
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;                  /* Chrome / Safari / Edge */
+}
+
+/* ============ Toast 卡片内的紧凑 Markdown（.prose 复用 + 收紧间距） ============ */
+.toast-md > :first-child {
+  margin-top: 0;
+}
+.toast-md > :last-child {
+  margin-bottom: 0;
+}
+.toast-md p,
+.toast-md ul,
+.toast-md ol,
+.toast-md blockquote,
+.toast-md table {
+  margin: 0.3em 0;
+}
+.toast-md h1,
+.toast-md h2,
+.toast-md h3,
+.toast-md h4 {
+  font-size: 1em;
+  font-weight: 600;
+  margin: 0.5em 0 0.25em;
+}
+.toast-md ul,
+.toast-md ol {
+  padding-left: 1.3em;
+}
+.toast-md li {
+  margin: 0.15em 0;
+}
+.toast-md pre {
+  margin: 0.4em 0;
+  padding: 0.6em 0.75em;
+}
+.toast-md hr {
+  margin: 0.6em 0;
+}
+
+/* 隐藏滚动条但保留滚动（固定高度文本域 / 代码预览用）。
+   注意：需要显式滚动条的场景（如工具选择列表）不要使用本类。 */
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-hidden {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* ========== CAD 画布：React Flow 控件玻璃化（与 glass 体系一致） ========== */
+.react-flow__controls {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border-light);
+  box-shadow: var(--glass-shadow);
+}
+.react-flow__controls-button {
+  width: 26px;
+  height: 26px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-light);
+  color: var(--text-secondary);
+}
+.react-flow__controls-button:last-child { border-bottom: none; }
+.react-flow__controls-button:hover { background: var(--bg-hover); }
+.react-flow__controls-button svg { fill: currentColor; }

@@ -1,0 +1,28 @@
+{
+  "name": "@illusion-forge/desktop",
+  "version": "0.4.14",
+  "description": "Illusion Forge 桌面版 - Electron 壳，内置 Python / Node.js 运行时（仅 Windows）",
+  "author": "YunTaiHua <3597489498@qq.com>",
+  "homepage": "https://github.com/YunTaiHua/illusion-forge",
+  "license": "MIT",
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build:ts": "tsc -p tsconfig.json",
+    "dev": "npm run build:ts && electron .",
+    "start": "electron .",
+    "fetch:runtimes": "python ../scripts/fetch_python.py && python ../scripts/fetch_node.py",
+    "build:icons": "python ../scripts/build_icons.py",
+    "dist": "npm run build:ts && electron-builder"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "electron": "^43.0.0",
+    "electron-builder": "^26.15.3",
+    "typescript": "^6.0.0"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  }
+}
