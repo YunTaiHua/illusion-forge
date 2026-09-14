@@ -3,16 +3,18 @@
 vendor 层（sw_connect 等）在模块导入期执行 ``import_com_dependencies()``，
 pywin32/comtypes 缺失时会走交互式 pip 安装确认（``input()``），在 pytest
 捕获 stdin 的环境下直接抛 OSError。本目录测试用 Fake COM 对象驱动、不发起
-真实 COM 调用，因此只需让"依赖可导入"即可：仅当真实依赖缺失时向
-sys.modules 注入桩模块（monkeypatch 自动恢复），真实依赖存在的开发机不受影响。
+真实 COM 调用，因此只需让"依赖可导入"即可。
+
+注意：桩模块必须在 **conftest 导入时** 注入（而非 autouse fixture）。
+pytest 收集测试模块时会立即执行模块顶层 import，此时 fixture 尚未运行；
+若等到 fixture 再打桩，CI 上 ``from pywintypes import com_error`` 会先炸。
+仅当真实依赖缺失时注入桩，开发机上已装 pywin32 不受影响。
 """
 from __future__ import annotations
 
 import importlib.util
 import sys
 import types
-
-import pytest
 
 
 class _ComStubError(Exception):
@@ -55,13 +57,17 @@ _STUB_NAMES = (
 )
 
 
-@pytest.fixture(autouse=True)
-def _stub_com_modules(monkeypatch: pytest.MonkeyPatch) -> None:
+def _install_com_stubs_if_missing() -> None:
     missing = [name for name in _STUB_NAMES if _module_missing(name)]
     if not missing:
         return
     stubs = {name: _make_stub(name) for name in _STUB_NAMES}
     for name in missing:
-        monkeypatch.setitem(sys.modules, name, stubs[name])
+        sys.modules.setdefault(name, stubs[name])
         if "." in name:
-            stubs[name.rsplit(".", 1)[0]].__dict__[name.rsplit(".", 1)[1]] = stubs[name]
+            parent, child = name.rsplit(".", 1)
+            stubs[parent].__dict__[child] = stubs[name]
+
+
+# conftest 加载即打桩：早于 tests/cad 下任意测试模块的顶层 import
+_install_com_stubs_if_missing()
