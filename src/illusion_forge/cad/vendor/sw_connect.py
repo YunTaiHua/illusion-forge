@@ -131,13 +131,23 @@ def get_com_member(obj: Any, attr_name: str, *args: Any) -> Any:
         raise
 
 
-def safe_get_com_member(obj: Any, attr_name: str, *args: Any) -> Any:
+_UNSET = object()
+
+
+def safe_get_com_member(obj: Any, attr_name: str, *args: Any, default: Any = _UNSET) -> Any:
     """
     读取 COM 成员，兼容 pywin32 中伪可调用属性。
 
-    保留该别名便于其它模块表达“安全读取”的意图；核心逻辑统一在 get_com_member。
+    传入 ``default`` 时为非抛出探测：成员缺失或调用失败一律返回 ``default``
+    （cad_python 工具描述与错误提示承诺的用法）。未传 ``default`` 时保持
+    ``get_com_member`` 的抛错语义，既有调用方行为不变。
     """
-    return get_com_member(obj, attr_name, *args)
+    if default is _UNSET:
+        return get_com_member(obj, attr_name, *args)
+    try:
+        return get_com_member(obj, attr_name, *args)
+    except (com_error, AttributeError, TypeError, ValueError, OSError, KeyError, IndexError):
+        return default
 
 
 def create_empty_dispatch_variant() -> Any:

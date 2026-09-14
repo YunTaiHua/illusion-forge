@@ -53,7 +53,8 @@ def _error_hint(exc: Exception) -> str:
             return ("host 常用属性：host.sw / host.model（活动文档，可能为 None）/ host.last_motion_study；"
                     "命名空间已直接预置 model 与 sw，无需经 host 取")
         return ("属性不存在——API 名称与直觉常有出入：特征类型名是 GetTypeName2（不是 TypeName）；"
-                "标题 GetTitle()；路径是属性 GetPathName（不加括号）；"
+                "取特征内的草图/实体用 gcm(feat, 'GetSpecificFeature2')；标题 GetTitle()；"
+                "路径是属性 GetPathName（不加括号）；"
                 "拿不准用 safe_gcm(obj, '成员名', default=None) 探测，遍历特征用 iter_features(model)")
     if "找不到成员" in text or "Member not found" in text:
         return ("COM 成员或参数不匹配：该成员可能是属性而非方法（obj.Name 而非 obj.Name()），"
@@ -61,7 +62,9 @@ def _error_hint(exc: Exception) -> str:
     if "找不到元素" in text or "Element not found" in text or "-2147319765" in text:
         return "pywin32 动态派发怪癖（成员存在但类型信息缺失）：改用 gcm(obj, '成员名', *参数) 重试即可"
     if "not callable" in text:
-        return "调用的成员是属性不是方法：去掉括号，或改用 gcm(obj, '成员名') 自动处理二态"
+        return ("pywin32 动态派发下，无参方法的裸属性访问已经执行并返回结果：feat.GetTypeName2（无括号）"
+                "直接得到类型名字符串，再加括号调用才报本错。写 feat.GetTypeName2 或 "
+                "gcm(feat, 'GetTypeName2')，不要写 feat.GetTypeName2()")
     if "-2147352561" in text or "非选择性的参数" in text or "PARAMNOTFOUND" in text:
         return ("COM 方法缺少必选参数或参数序号不匹配：检查 API 签名中每个参数的位置和类型；"
                 "二态成员统一用 gcm(obj, 'Name', *args)；遍历特征用 iter_features(model)")
@@ -88,7 +91,7 @@ Pre-bound namespace: `sw` (ISldWorks), `model` (active IModelDoc2, may be None),
 
 Rules: an expression returns its value directly; for statements set a `result` variable to return data. Raw SolidWorks API lengths are in METERS — wrap millimeter values with mm(). Keep it short (blocks the serial CAD queue); prefer dedicated cad_* tools when one exists. Example: `result = model.Extension.CreateDimension(...)`.
 
-Cheat sheet (pre-bound helpers avoiding pywin32 pitfalls): `gcm(obj,'Name',*args)` property/method-safe access (PREFER over obj.Name()); `safe_gcm(obj,'Name',default=None)` non-raising probe; `iter_features(model)`; feature type name is GetTypeName2 (NOT TypeName); geometry/bbox prefer cad_review_run. On failure read the `hint` field and self-correct."""
+Cheat sheet (pre-bound helpers avoiding pywin32 pitfalls): `gcm(obj,'Name',*args)` property/method-safe access (PREFER over obj.Name()); `safe_gcm(obj,'Name',default=None)` non-raising probe; `iter_features(model)` walks the feature tree; feature type name via `gcm(f,'GetTypeName2')` (NOT TypeName; bare `f.GetTypeName2` already returns the string, so `f.GetTypeName2()` raises); sketch/body inside a feature via `gcm(feat,'GetSpecificFeature2')`; geometry/bbox prefer cad_review_run. On failure read the `hint` field and self-correct."""
     input_model = CadPythonInput
 
     async def execute(self, arguments: CadPythonInput, context: ToolExecutionContext) -> ToolResult:
