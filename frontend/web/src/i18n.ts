@@ -486,12 +486,23 @@ const ZH: Record<string, string> = {
   custom_label: '自定义',
   bg_agent_label: '后台代理',
   binary_file: '二进制文件，不支持预览',
-  lines_label: '行',
   truncated_label: '已截断',
+  // ---- 预览标签页（多文件同时查看）----
+  close_tab: '关闭标签页',
+  close_other_tabs: '关闭其他标签页',
+  close_all_tabs: '关闭所有标签页',
+  tab_actions: '标签页操作',
+  open_file_path: '按路径打开文件（支持工作区外的绝对路径）',
+  open_file_path_placeholder: '输入文件路径（绝对路径或工作区内相对路径）',
+  open_action: '打开',
+  // ---- 文件已删除的预览空态 ----
+  file_deleted_title: '文件已被删除',
+  file_deleted_hint: '该文件已不存在于磁盘，无法预览内容',
+  session_file_file_not_found: '文件已被删除或不存在',
+  session_file_path_invalid: '路径无效或超出工作区范围',
   popout_preview: '弹窗查看',
   content_view: '内容',
   diff_view: 'Diff',
-  diff_vs_head: '相对 HEAD 的变更',
   // ---- 右栏区块标题 ----
   skills_title: '技能',
   plugins_title: '插件',
@@ -525,12 +536,7 @@ const ZH: Record<string, string> = {
   session_file_not_in_session: '文件不在本会话修改记录中',
   session_file_file_deleted: '文件已被删除',
   // ---- 智能体与任务 ----
-  agent_type_agent: '智能体',
-  agent_type_task: '任务',
   no_agent_tasks: '暂无智能体与任务',
-  task_done: '完成',
-  task_failed: '失败',
-  task_running: '运行中',
   // ---- 沙箱 Tab ----
   setupFormSandboxTitle: '沙箱设置',
   // ---- CAD 画布工作台 ----
@@ -1038,12 +1044,23 @@ const EN: Record<string, string> = {
   custom_label: 'custom',
   bg_agent_label: 'Background agent',
   binary_file: 'Binary file, preview not supported',
-  lines_label: 'lines',
   truncated_label: 'Truncated',
+  // ---- preview tabs (multiple files at once) ----
+  close_tab: 'Close tab',
+  close_other_tabs: 'Close other tabs',
+  close_all_tabs: 'Close all tabs',
+  tab_actions: 'Tab actions',
+  open_file_path: 'Open file by path (absolute paths outside workspace supported)',
+  open_file_path_placeholder: 'File path (absolute or workspace-relative)',
+  open_action: 'Open',
+  // ---- deleted-file preview empty state ----
+  file_deleted_title: 'File deleted',
+  file_deleted_hint: 'This file no longer exists on disk and cannot be previewed',
+  session_file_file_not_found: 'File has been deleted or does not exist',
+  session_file_path_invalid: 'Invalid path or outside workspace',
   popout_preview: 'Open in popup',
   content_view: 'Content',
   diff_view: 'Diff',
-  diff_vs_head: 'Changes vs HEAD',
   // ---- right panel section titles ----
   skills_title: 'Skills',
   plugins_title: 'Plugins',
@@ -1076,12 +1093,7 @@ const EN: Record<string, string> = {
   session_file_not_in_session: 'Not in this session\'s modified files',
   session_file_file_deleted: 'File has been deleted',
   // ---- agents & tasks ----
-  agent_type_agent: 'agent',
-  agent_type_task: 'task',
   no_agent_tasks: 'No agents or tasks',
-  task_done: 'done',
-  task_failed: 'failed',
-  task_running: 'running',
   // ---- sandbox tab ----
   setupFormSandboxTitle: 'Sandbox',
   // ---- CAD workbench ----
