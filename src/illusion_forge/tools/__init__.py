@@ -57,6 +57,7 @@ def create_default_tool_registry(
     mcp_manager: Any = None,
     channel_tools: list[BaseTool[Any]] | None = None,
     goal_enabled: bool = False,
+    browser_enabled: bool = False,
     cad_enabled: bool = False,
 ) -> ToolRegistry:
     """返回默认内置工具注册表
@@ -106,6 +107,11 @@ def create_default_tool_registry(
     if goal_enabled:
         # goal 工具（get_goal/create_goal/update_goal）
         tools.extend([GetGoalTool(), CreateGoalTool(), UpdateGoalTool()])
+    if browser_enabled:
+        # 内置浏览器工具（browser-use 插件启用时；browser_* 前缀 12 个）
+        # 惰性导入：browser 子包引入 httpx 等依赖，避免未启用时增加启动开销
+        from illusion_forge.tools.browser_tools import create_browser_tools
+        tools.extend(create_browser_tools())
     for tool in tools:
         registry.register(tool)
     if cad_enabled:

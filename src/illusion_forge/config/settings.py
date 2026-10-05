@@ -441,6 +441,22 @@ class WorkbenchSettings(BaseModel):
     )
 
 
+class BrowserSettings(BaseModel):
+    """内置浏览器设置（browser-use 插件）。
+
+    kernel: 托管内核（auto/chromium/chrome/msedge）；桌面桥接模式忽略。
+    headless: 托管模式是否无头运行（桌面模式恒为可视 webview）
+    viewport_width / viewport_height: 默认视口尺寸
+    proxy: auto（自动探测系统代理与 HTTP(S)_PROXY）/ off / 显式 URL
+    """
+
+    kernel: str = "auto"
+    headless: bool = True
+    viewport_width: int = 1280
+    viewport_height: int = 720
+    proxy: str = "auto"
+
+
 class Settings(BaseModel):
     """IllusionForge 主设置模型（env_N 分组格式）"""
 
@@ -462,6 +478,7 @@ class Settings(BaseModel):
     goal: GoalSettings = Field(default_factory=GoalSettings)
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
+    browser: BrowserSettings = Field(default_factory=BrowserSettings)
     workbench: WorkbenchSettings = Field(default_factory=WorkbenchSettings)  # CAD 工作台（可选附加功能）：关闭时不注册 CAD 工具域、不导入重依赖
     agent_models: dict[str, str] = Field(default_factory=dict)  # 内置 agent 的默认模型固化（agent 名 → "inherit" | "env_N.model_M"）。
     enabled_plugins: dict[str, bool] = Field(default_factory=dict)

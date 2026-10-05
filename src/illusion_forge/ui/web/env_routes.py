@@ -487,6 +487,11 @@ def register_env_routes(app: FastAPI, host_config: Any | None = None) -> None:
                 "dream_model": settings.memory.dream_model,
                 "directory": settings.memory.directory,
             },
+            "browser": {
+                "kernel": settings.browser.kernel,
+                "headless": settings.browser.headless,
+                "proxy": settings.browser.proxy,
+            },
             "title": {
                 "enabled": settings.title.enabled,
                 "model": settings.title.model,

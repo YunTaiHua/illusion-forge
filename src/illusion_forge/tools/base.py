@@ -136,6 +136,10 @@ class ToolRegistry:
         """
         self._tools[tool.name] = tool
 
+    def unregister(self, name: str) -> None:
+        """按名称移除工具（插件热切换用；名称不存在时静默）。"""
+        self._tools.pop(name, None)
+
     def get(self, name: str) -> BaseTool[Any] | None:
         """按名称返回已注册的工具
         

@@ -114,6 +114,22 @@ class FrontendRequest(BaseModel):
         "agent_wizard_submit",
         # === Goal 状态栏操作（web GoalBar；terminal 用 /goal 命令）===
         "goal_action",
+        # === 内置浏览器（右栏可视化面板；browser-use 插件）===
+        "web_browser_open",
+        "web_browser_close",
+        "web_browser_navigate",
+        "web_browser_back",
+        "web_browser_forward",
+        "web_browser_reload",
+        "web_browser_capture",
+        "web_browser_devtools",
+        "web_browser_pick_start",
+        "web_browser_pick_cancel",
+        "web_browser_tabs",
+        "web_browser_resize",
+        "web_browser_interact",
+        # === 插件启用/禁用开关（右栏插件列表 + 设置页插件 Tab）===
+        "web_plugin_toggle",
         # === CAD 画布工作台（web 画布视图；web_canvas_get 拉取 /
         #     web_canvas_update 提交用户整板编辑，变更经
         #     cad_canvas_update 事件广播）===
@@ -165,6 +181,16 @@ class FrontendRequest(BaseModel):
     goal_id: str | None = None  # CAS：当前 goal 的精确 id
     revision: int | None = None  # CAS：当前 goal 的精确 revision
     objective: str | None = None  # edit 的替换目标文本
+    # === 内置浏览器专属字段 ===
+    browser_action: str | None = None  # web_browser_tabs: list/new/close/select
+    url: str | None = None  # web_browser_navigate / web_browser_tabs new
+    tab_id: str | None = None  # 目标标签页 id
+    x: float | None = None  # web_browser_interact / resize 坐标
+    y: float | None = None
+    dx: float | None = None  # web_browser_interact scroll 增量
+    dy: float | None = None
+    width: int | None = None  # web_browser_resize
+    height: int | None = None
     # === CAD 画布工作台专属字段（web_canvas_update 的整板载荷）===
     canvas: dict[str, Any] | None = None
     # === 会话类型标记：web_new_session 携带，写入 meta 并随列表推送 ===
@@ -174,6 +200,18 @@ class FrontendRequest(BaseModel):
     #     （web_session_ready/web_restore_completed）原样回显，前端据此
     #     精确配对"哪次操作产生的激活"，杜绝迟到事件劫持活跃会话 ===
     client_token: str | None = None
+
+
+class TranscriptMedia(BaseModel):
+    """转录项附带的媒体（如内置浏览器截图）。
+
+    Attributes:
+        mime: MIME 类型（image/jpeg）
+        data: base64 编码的媒体数据
+    """
+
+    mime: str = "image/jpeg"
+    data: str = ""
 
 
 class TranscriptItem(BaseModel):
@@ -197,6 +235,7 @@ class TranscriptItem(BaseModel):
     is_error: bool | None = None
     reasoning: str | None = None
     tool_use_id: str | None = None
+    media: TranscriptMedia | None = None
     # 新增：并行分组支持
     message_id: str | None = None
     # 新增：会话快照恢复标记
@@ -341,6 +380,10 @@ class BackendEvent(BaseModel):
         "update_available",
         # === Toast 通知推送（web/desktop 监管外提醒，前端可透传系统级通知）===
         "toast",
+        # === 内置浏览器（右栏可视化面板）===
+        "browser_state",
+        "browser_frame",
+        "browser_pick_result",
     ]
     select_options: list[dict[str, Any]] | None = None
     message: str | None = None
@@ -416,6 +459,10 @@ class BackendEvent(BaseModel):
     error: str | None = None
     agent: dict[str, Any] | None = None
     tools: list[dict[str, Any]] | None = None
+    # === 内置浏览器（右栏可视化面板）===
+    browser: dict[str, Any] | None = None    # browser_state 载荷（open/mode/tabs/viewport）
+    frame: dict[str, Any] | None = None      # browser_frame 载荷（tab_id/url/jpeg_base64）
+    pick: dict[str, Any] | None = None       # browser_pick_result 载荷（元素信息 + ref）
     skills: list[dict[str, Any]] | None = None
     models: list[dict[str, Any]] | None = None
     success: bool | None = None

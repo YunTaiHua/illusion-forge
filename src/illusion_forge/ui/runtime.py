@@ -129,6 +129,8 @@ class RuntimeBundle:
     hook_additional_contexts: list[str] = field(default_factory=list[Any])
     # 渠道感知提示词（PC 终端或渠道端注入），handle_line 重建系统提示词时复用
     channel_hint: str | None = None
+    # 内置浏览器管理器（browser-use 插件启用时创建；随 bundle 生命周期关闭）
+    browser_manager: Any = None
     # 会话类型（工作台/聊天）：内存属性，创建时确定；首条消息落盘时由
     # _update_session_meta 写入 meta（空会话零磁盘痕迹）
     workbench: bool = False
@@ -425,6 +427,25 @@ def _build_system_prompt_with_append(
     return _base_prompt
 
 
+# 在途预热任务（持引用防 GC；完成后自动移除）
+_PREWARM_TASKS: set[asyncio.Task[None]] = set()
+
+
+async def _prewarm_browser(manager: Any) -> None:
+    """后台预热浏览器后端（插件启用且 headless 时随 bundle 创建调用）。
+
+    托管模式首启要拉起 Chromium（2-5s），等用户点开浏览器再启动会卡出
+    明显空窗。预热只启动进程/上下文、不建 tab——面板仍为零 tab 空态，
+    无 about:blank 闪现。失败静默（首次实际使用时按原路径重试并报错）。
+    """
+    try:
+        await manager.ensure_started()
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "[browser] 预热失败（首次使用时将重试）", exc_info=True
+        )
+
+
 async def build_runtime(
     *,
     prompt: str | None = None,
@@ -554,6 +575,8 @@ async def build_runtime(
     cwd = str(Path(str(cwd)).expanduser().resolve()) if cwd else str(Path.cwd())
     # 加载插件（--bare 模式跳过）
     if not bare:
+        from illusion_forge.browser.seeding import seed_builtin_browser_plugin
+        seed_builtin_browser_plugin()
         plugins = load_plugins(settings, cwd)
     else:
         plugins = []
@@ -652,11 +675,36 @@ async def build_runtime(
     # 全局开关只会让切换过一次工作台之后的所有会话（聊天/渠道/无头）都带上
     # CAD 工具。共享注册表属于初始聊天会话，永不携带 CAD 工具；工作台会话
     # 由 build_session_engine 经 tool_registry_factory 按类型重建。
+    # 内置浏览器工具随 browser-use 插件启用注册（插件开关决定浏览器能力
+    # 是否进会话）。必须尊重 enabled：禁用后新 bundle/重启不得注册工具、
+    # 创建 BrowserManager 或预热 Chromium（与 skills/hooks loader 口径一致）
+    browser_plugin_enabled = any(
+        getattr(p.manifest, "name", "") == "browser-use" and p.enabled for p in (plugins or [])
+    )
+    browser_manager: Any = None
+    if browser_plugin_enabled:
+        from illusion_forge.browser import BrowserConfig, BrowserManager
+        browser_manager = BrowserManager(BrowserConfig(
+            kernel=settings.browser.kernel,
+            headless=settings.browser.headless,
+            viewport_width=settings.browser.viewport_width,
+            viewport_height=settings.browser.viewport_height,
+            proxy=settings.browser.proxy,
+        ))
+        # 预热：插件启用即在后台启动浏览器后端（托管模式为拉起 Chromium，
+        # 首次 2-5s）。等用户点开浏览器再起会卡出明显空窗；预热只起进程
+        # 不建 tab，无 about:blank 闪现。有头模式不预热（会抢占前台）。
+        if settings.browser.headless:
+            task = asyncio.get_running_loop().create_task(_prewarm_browser(browser_manager))
+            _PREWARM_TASKS.add(task)
+            task.add_done_callback(_PREWARM_TASKS.discard)
+
     def _build_tool_registry(*, cad_enabled: bool) -> ToolRegistry:
         registry = create_default_tool_registry(
             mcp_manager,
             channel_tools=channel_tools,
             goal_enabled=settings.goal.enabled,
+            browser_enabled=browser_plugin_enabled,
             cad_enabled=cad_enabled,
         )
         # 应用 CLI 工具过滤（--allowed-tools / --disallowed-tools）
@@ -742,6 +790,7 @@ async def build_runtime(
             "session_id": session_id,
             "session_hook_store": session_hook_store,
             "session_name": name,
+            "browser_manager": browser_manager,
         },
         effort=EffortMapper.normalize(settings.effort),
         session_id=session_id,
@@ -820,6 +869,7 @@ async def build_runtime(
         session_id=session_id,
         settings_overrides=settings_overrides,
         channel_hint=channel_hint,
+        browser_manager=browser_manager,
         tool_registry_factory=_build_tool_registry,
     )
 
@@ -869,6 +919,12 @@ async def close_runtime(bundle: RuntimeBundle) -> None:
     from illusion_forge.swarm.team_helpers import cleanup_session_teams
 
     await cleanup_session_teams()
+    # 关闭内置浏览器（browser-use 插件启用时持有；幂等）
+    if bundle.browser_manager is not None:
+        try:
+            await bundle.browser_manager.aclose()
+        except Exception:
+            logging.getLogger(__name__).debug("关闭浏览器管理器失败", exc_info=True)
     # 关闭 MCP 管理器
     await bundle.mcp_manager.close()
     # 执行会话结束钩子

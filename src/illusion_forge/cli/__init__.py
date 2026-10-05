@@ -84,6 +84,7 @@ plugin_app = typer.Typer(name="plugin", help="插件管理 / Manage plugins")
 auth_app = typer.Typer(name="auth", help="认证管理 / Manage authentication")
 cron_app = typer.Typer(name="cron", help="定时任务管理 / Manage cron scheduler and jobs")
 forge_app = typer.Typer(name="forge", help="启动 Illusion Forge Web 界面 / Launch the Illusion Forge Web UI")
+browser_app = typer.Typer(name="browser", help="内置浏览器管理 / Manage the built-in browser")
 add_app = typer.Typer(name="add", help="添加资源 / Add resources (e.g. add model to existing env)")
 channel_app = typer.Typer(name="channel", help="渠道管理 / Manage messaging channels")
 
@@ -93,6 +94,7 @@ app.add_typer(plugin_app)
 app.add_typer(auth_app)
 app.add_typer(cron_app)
 app.add_typer(forge_app)
+app.add_typer(browser_app)
 app.add_typer(add_app)
 app.add_typer(channel_app)
 
@@ -107,6 +109,7 @@ for _module_name in (
     "plugin",
     "cron",
     "auth",
+    "browser",
     "forge",
     "update",
     "channel",

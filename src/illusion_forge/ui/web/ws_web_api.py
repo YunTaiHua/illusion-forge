@@ -329,6 +329,22 @@ class WebApiDispatcher:
             "web_request_agents": self.handle_web_request_agents,
             "web_update_agent": self.handle_web_update_agent,
             "web_delete_agent": self.handle_web_delete_agent,
+            # 内置浏览器（右栏可视化面板）
+            "web_browser_open": self.handle_web_browser_open,
+            "web_browser_close": self.handle_web_browser_close,
+            "web_browser_navigate": self.handle_web_browser_navigate,
+            "web_browser_back": self.handle_web_browser_back,
+            "web_browser_forward": self.handle_web_browser_forward,
+            "web_browser_reload": self.handle_web_browser_reload,
+            "web_browser_pick_start": self.handle_web_browser_pick_start,
+            "web_browser_pick_cancel": self.handle_web_browser_pick_cancel,
+            "web_browser_capture": self.handle_web_browser_capture,
+            "web_browser_devtools": self.handle_web_browser_devtools,
+            "web_browser_tabs": self.handle_web_browser_tabs,
+            "web_browser_resize": self.handle_web_browser_resize,
+            "web_browser_interact": self.handle_web_browser_interact,
+            # 插件启用/禁用开关
+            "web_plugin_toggle": self.handle_web_plugin_toggle,
             # CAD 画布工作台（讨论画布：拉取/用户整板编辑）
             "web_canvas_get": self.handle_web_canvas_get,
             "web_canvas_update": self.handle_web_canvas_update,
@@ -1019,10 +1035,35 @@ class WebApiDispatcher:
         # 键名 → app_state 字段名映射（settings 字段名可能与 key 不同）
         if key not in (
             "effort", "permission_mode", "model", "context_window",
+            # 内置浏览器（browser-use 插件配置；写入 settings.browser.*）
+            "browser_kernel", "browser_headless", "browser_proxy",
             "ui_language", "turns",
         ):
             return False, f"不支持的设置键: {key}"
 
+            if key.startswith("browser_"):
+                # 内置浏览器配置：settings.browser.<field>（新会话生效；
+                # 托管后端在下一次浏览器启动时读取）
+                field = key.removeprefix("browser_")
+                if field == "kernel":
+                    if str(value) not in ("auto", "chromium", "chrome", "msedge"):
+                        return False, f"不支持的浏览器内核: {value}"
+                    settings.browser.kernel = str(value)
+                elif field == "headless":
+                    settings.browser.headless = bool(value)
+                elif field == "proxy":
+                    settings.browser.proxy = str(value).strip() or "auto"
+                else:
+                    return False, f"不支持的设置键: {key}"
+                _save_settings(settings)
+                # 已存在的 BrowserManager 即时刷新配置（未打开的浏览器下次启动生效）
+                for ws_bundle in self._host._workspace_bundles():
+                    manager = getattr(ws_bundle, "browser_manager", None)
+                    if manager is not None:
+                        manager.config.kernel = settings.browser.kernel
+                        manager.config.headless = settings.browser.headless
+                        manager.config.proxy = settings.browser.proxy
+                return True, None
         try:
             if key == "permission_mode":
                 # PermissionMode 是枚举，必须整体赋值（.value 只读，不能直接设）
@@ -1254,6 +1295,7 @@ class WebApiDispatcher:
         requested = (request.path or "").strip()
         rel = requested.replace("\\", "/")
         # 绝对路径不限定工作区（任意位置可读）；相对路径仍须落在工作区内
+        target: Path | None
         if Path(rel).is_absolute():
             target = Path(rel)
         else:
@@ -2033,6 +2075,719 @@ class WebApiDispatcher:
             for sr in host._sessions.values():
                 host._refresh_session_display(sr)
             await host._push_sessions()
+
+
+    # === 内置浏览器（右栏可视化面板）===
+
+    def _browser_manager(self, request: FrontendRequest) -> Any | None:
+        """解析浏览器管理器（目标工作区 bundle 持有；未启用时 None）。"""
+        host = self._host
+        if host._bundle is None:
+            return None
+        bundle = self._resolve_resource_bundle(request)
+        return getattr(bundle, "browser_manager", None)
+
+    async def _push_browser_state(self, manager: Any, error: str | None = None) -> None:
+        """把浏览器当前状态推给前端（面板打开/Tab 变化；error=最近一次导航失败）。"""
+        try:
+            if manager.is_open:
+                backend = await manager.ensure_started()
+                state = await backend.get_state()
+                payload: dict[str, Any] = {
+                    "open": True,
+                    "mode": backend.mode,
+                    "tabs": [t.to_dict() for t in state.tabs],
+                    "viewport_width": state.viewport_width,
+                    "viewport_height": state.viewport_height,
+                }
+                if error:
+                    payload["error"] = error
+                await self._emit(BackendEvent(type="browser_state", browser=payload))
+            else:
+                await self._emit(BackendEvent(type="browser_state", browser={
+                    "open": False, "mode": manager.mode, "tabs": [],
+                }))
+        except Exception:
+            log.exception("推送浏览器状态失败")
+
+    async def handle_web_browser_open(self, request: FrontendRequest) -> None:
+        """打开右栏浏览器面板（无浏览器时启动）。"""
+        manager = self._browser_manager(request)
+        if manager is None:
+            await self._emit(BackendEvent(
+                type="error",
+                message="Browser is unavailable: enable the browser-use plugin first.",
+            ))
+            return
+        from illusion_forge.browser.base import BrowserCommandError
+        try:
+            await manager.panel_open()
+        except BrowserCommandError as exc:
+            await self._emit(BackendEvent(type="error", message=str(exc)))
+            return
+        await self._push_browser_state(manager)
+        await self.handle_web_browser_capture(request)
+
+    async def handle_web_browser_close(self, request: FrontendRequest) -> None:
+        """关闭右栏浏览器面板（托管模式同时关闭浏览器进程）。"""
+        manager = self._browser_manager(request)
+        if manager is None:
+            return
+        await manager.panel_close()
+        await self._push_browser_state(manager)
+
+    async def _background_navigate(self, manager: Any, backend: Any, tab_id: str, url: str) -> None:
+        """后台完成面板导航（不阻塞串行 WS 分发循环）。
+
+        导航等待页面加载（桌面桥 loadURL 20s 超时 / 托管 goto），慢站点
+        （github.com 等在本机网络下 20-30s）会把串行循环卡死——期间拾取、
+        URL 栏、tab 状态全部无响应（"启动后长达一分钟不可用"的根因）。
+        导航改后台执行：完成后推状态 + 补拍；失败推 error 态。
+        """
+        from illusion_forge.browser.base import BrowserCommandError
+        try:
+            await backend.navigate(tab_id, url)
+        except BrowserCommandError as exc:
+            await self._emit(BackendEvent(type="error", message=str(exc)))
+            await self._push_browser_state(manager, error=str(exc))
+            return
+        await self._push_browser_state(manager)
+        await manager.panel_capture(tab_id)
+
+    async def handle_web_browser_navigate(self, request: FrontendRequest) -> None:
+        """面板 URL 栏导航（后台执行：立即回执，不等待页面加载）。"""
+        from illusion_forge.browser.base import BrowserCommandError
+        manager = self._browser_manager(request)
+        if manager is None:
+            await self._emit(BackendEvent(
+                type="error",
+                message="Browser is unavailable: enable the browser-use plugin first.",
+            ))
+            return
+        if not manager.is_open:
+            # 入口自开：右栏输入/+ 面板可能在 open 完成前就并发到达导航，
+            # 各自补齐打开动作，避免竞态丢请求
+            try:
+                await manager.panel_open()
+            except BrowserCommandError as exc:
+                await self._emit(BackendEvent(type="error", message=str(exc)))
+                return
+        backend = await manager.ensure_started()
+        url = request.url or "about:blank"
+        tab_id = request.tab_id
+        if not tab_id:
+            # 零 tab：优先接管空白 tab，否则新建（都是瞬时操作）
+            try:
+                tabs = await backend.list_tabs()
+            except BrowserCommandError:
+                tabs = []
+            blank = next((t for t in tabs if t.url == "about:blank"), None)
+            if blank is not None:
+                tab_id = blank.id
+            elif not tabs:
+                # 桌面：create-with-url 直建；托管：new_tab(None)+后台导航
+                if backend.mode == "desktop":
+                    try:
+                        await backend.new_tab(url)
+                    except BrowserCommandError as exc:
+                        await self._emit(BackendEvent(type="error", message=str(exc)))
+                        await self._push_browser_state(manager, error=str(exc))
+                        return
+                    await self._push_browser_state(manager)
+                    tab = await backend.get_active_tab()
+                    await manager.panel_capture(tab.id)
+                    return
+                created = await backend.new_tab(None)
+                await self._push_browser_state(manager)
+                self._host._create_background_task(
+                    self._background_navigate(manager, backend, created.id, url))
+                return
+            else:
+                tab = await backend.get_active_tab()
+                tab_id = tab.id
+        # 导航后台化：立即返回（面板 busy 指示由前端自持），完成/失败后推状态
+        self._host._create_background_task(
+            self._background_navigate(manager, backend, tab_id, url))
+
+    async def handle_web_browser_back(self, request: FrontendRequest) -> None:
+        """面板后退（goBack）。"""
+        from illusion_forge.browser.base import BrowserCommandError
+        manager = self._browser_manager(request)
+        if manager is None or not manager.is_open:
+            return
+        backend = await manager.ensure_started()
+        tab_id = request.tab_id
+        if not tab_id:
+            tab = await backend.get_active_tab()
+            tab_id = tab.id
+        try:
+            await backend.go_back(tab_id)
+        except BrowserCommandError as exc:
+            await self._emit(BackendEvent(type="error", message=str(exc)))
+            await self._push_browser_state(manager, error=str(exc))
+            return
+        await self._push_browser_state(manager)
+        await manager.panel_capture(tab_id)
+
+    async def handle_web_browser_forward(self, request: FrontendRequest) -> None:
+        """面板前进（goForward）。"""
+        from illusion_forge.browser.base import BrowserCommandError
+        manager = self._browser_manager(request)
+        if manager is None or not manager.is_open:
+            return
+        backend = await manager.ensure_started()
+        tab_id = request.tab_id
+        if not tab_id:
+            tab = await backend.get_active_tab()
+            tab_id = tab.id
+        try:
+            await backend.go_forward(tab_id)
+        except BrowserCommandError as exc:
+            await self._emit(BackendEvent(type="error", message=str(exc)))
+            await self._push_browser_state(manager, error=str(exc))
+            return
+        await self._push_browser_state(manager)
+        await manager.panel_capture(tab_id)
+
+    async def handle_web_browser_pick_start(self, request: FrontendRequest) -> None:
+        """启动网页元素拾取：向激活 tab 注入选择器脚本，用户点击/Esc 时返回。
+
+        脚本由前端下发（Promise 式：注入一次即启动选择态，用户操作完成后
+        resolve）。结果经 browser_pick_result 事件广播。
+        """
+        from illusion_forge.browser.base import BrowserCommandError
+        manager = self._browser_manager(request)
+        if manager is None or not manager.is_open:
+            return
+        backend = await manager.ensure_started()
+        script = request.value or ""
+        if not script:
+            await self._emit(BackendEvent(
+                type="browser_pick_result", pick={"error": "Element picking script missing."},
+            ))
+            return
+        try:
+            tab = await backend.get_active_tab()
+        except BrowserCommandError as exc:
+            # 无可用 tab（桌面端无 guest attach / 托管端零 tab）：无元素可拾取
+            await self._emit(BackendEvent(
+                type="browser_pick_result", pick={"error": str(exc)},
+            ))
+            return
+        # 后台等待用户拾取（长任务）：不阻塞 WS 分发循环
+        async def _run_pick() -> None:
+            try:
+                element = await backend.pick_script(tab.id, script)
+                await self._emit(BackendEvent(type="browser_pick_result", pick=element))
+            except BrowserCommandError as exc:
+                await self._emit(BackendEvent(
+                    type="browser_pick_result", pick={"error": str(exc)},
+                ))
+            except Exception:
+                log.exception("网页元素拾取失败")
+        self._host._create_background_task(_run_pick())
+
+    async def handle_web_browser_pick_cancel(self, request: FrontendRequest) -> None:
+        """取消进行中的网页元素拾取。"""
+        from illusion_forge.browser.base import BrowserCommandError
+        manager = self._browser_manager(request)
+        if manager is None or not manager.is_open:
+            return
+        backend = await manager.ensure_started()
+        try:
+            tab = await backend.get_active_tab()
+            await backend.pick_cancel(tab.id)
+        except BrowserCommandError:
+            pass
+
+    async def handle_web_browser_reload(self, request: FrontendRequest) -> None:
+        """面板刷新（页面 reload，而非仅重拍截图）。"""
+        from illusion_forge.browser.base import BrowserCommandError
+        manager = self._browser_manager(request)
+        if manager is None or not manager.is_open:
+            return
+        backend = await manager.ensure_started()
+        tab_id = request.tab_id
+        if not tab_id:
+            tab = await backend.get_active_tab()
+            tab_id = tab.id
+        try:
+            await backend.reload(tab_id)
+        except BrowserCommandError as exc:
+            await self._emit(BackendEvent(type="error", message=str(exc)))
+            await self._push_browser_state(manager, error=str(exc))
+            return
+        await self._push_browser_state(manager)
+        await manager.panel_capture(tab_id)
+
+    async def handle_web_browser_devtools(self, request: FrontendRequest) -> None:
+        """打开调试工具 ⋯ 菜单项；仅桌面桥支持）。"""
+        from illusion_forge.browser.base import BrowserCommandError
+        manager = self._browser_manager(request)
+        if manager is None or not manager.is_open:
+            return
+        backend = await manager.ensure_started()
+        tab_id = request.tab_id
+        if not tab_id:
+            tab = await backend.get_active_tab()
+            tab_id = tab.id
+        try:
+            await backend.open_devtools(tab_id)
+        except BrowserCommandError as exc:
+            await self._emit(BackendEvent(type="error", message=str(exc)))
+
+    async def handle_web_browser_capture(self, request: FrontendRequest) -> None:
+        """面板打开/刷新时主动拉取一帧截图（同时推送状态，URL 栏同步）。"""
+        from illusion_forge.browser.base import BrowserCommandError
+        manager = self._browser_manager(request)
+        if manager is None or not manager.is_open:
+            return
+        try:
+            await manager.panel_capture(request.tab_id)
+        except BrowserCommandError:
+            # 浏览器尚未打开/无 tab：静默（前端显示占位）
+            pass
+        await self._push_browser_state(manager)
+
+    async def handle_web_browser_tabs(self, request: FrontendRequest) -> None:
+        """面板 Tab 条操作（new/close/select）。
+
+        new 带 URL 时（文件预览卡片 + 面板）：浏览器未打开则先自开再建 tab；
+        建页瞬时完成、导航后台执行（等待加载会卡死串行分发循环——慢站点
+        下"+ 输入网址"表现为整面板一分钟无响应）。close/select 均为瞬时操作。
+        """
+        from illusion_forge.browser.base import BrowserCommandError
+        manager = self._browser_manager(request)
+        if manager is None:
+            await self._emit(BackendEvent(
+                type="error",
+                message="Browser is unavailable: enable the browser-use plugin first.",
+            ))
+            return
+        action = (request.browser_action or "list").lower()
+        if not manager.is_open:
+            if action == "new":
+                try:
+                    await manager.panel_open()
+                except BrowserCommandError as exc:
+                    await self._emit(BackendEvent(type="error", message=str(exc)))
+                    return
+            else:
+                return
+        backend = await manager.ensure_started()
+        if action == "new":
+            # 桌面：create-with-url（渲染层 src 一次加载，瞬时回执）；
+            # 托管：new_tab(None) + 后台导航（page.goto 等待加载会卡串行循环）
+            if request.url and backend.mode == "desktop":
+                try:
+                    await backend.new_tab(request.url)
+                except BrowserCommandError as exc:
+                    await self._emit(BackendEvent(type="error", message=str(exc)))
+                    await self._push_browser_state(manager, error=str(exc))
+                    return
+                await self._push_browser_state(manager)
+                await self.handle_web_browser_capture(request)
+                return
+            try:
+                info = await backend.new_tab(None)
+            except BrowserCommandError as exc:
+                await self._emit(BackendEvent(type="error", message=str(exc)))
+                await self._push_browser_state(manager, error=str(exc))
+                return
+            await self._push_browser_state(manager)
+            if request.url:
+                self._host._create_background_task(
+                    self._background_navigate(manager, backend, info.id, request.url))
+            else:
+                await manager.panel_capture(info.id)
+            return
+        try:
+            if action == "close" and request.tab_id:
+                await backend.close_tab(request.tab_id)
+            elif action == "select" and request.tab_id:
+                await backend.select_tab(request.tab_id)
+        except BrowserCommandError as exc:
+            await self._emit(BackendEvent(type="error", message=str(exc)))
+            return
+        await self._push_browser_state(manager)
+        await self.handle_web_browser_capture(request)
+
+    async def handle_web_browser_resize(self, request: FrontendRequest) -> None:
+        """面板视口调节。"""
+        from illusion_forge.browser.base import BrowserCommandError
+        manager = self._browser_manager(request)
+        if manager is None or not manager.is_open:
+            return
+        backend = await manager.ensure_started()
+        tab = await backend.get_active_tab()
+        try:
+            await backend.resize(tab.id, request.width or 1280, request.height or 720)
+        except BrowserCommandError as exc:
+            await self._emit(BackendEvent(type="error", message=str(exc)))
+            return
+        await self._push_browser_state(manager)
+
+    async def handle_web_browser_interact(self, request: FrontendRequest) -> None:
+        """Web 版截图流上的用户交互转发（点击/滚动/按键/输入）。"""
+        from illusion_forge.browser.base import BrowserCommandError
+        manager = self._browser_manager(request)
+        if manager is None or not manager.is_open:
+            return
+        kind = request.browser_action or "click"
+        try:
+            await manager.interact(
+                kind,
+                request.x or 0.0,
+                request.y or 0.0,
+                dx=request.dx or 0.0,
+                dy=request.dy or 0.0,
+                key=request.value or "",
+                text=request.query or "",
+            )
+        except BrowserCommandError as exc:
+            await self._emit(BackendEvent(type="error", message=str(exc)))
+
+    # === 插件启用/禁用开关（右栏插件列表 + 设置页插件 Tab）===
+
+    async def handle_web_plugin_toggle(self, request: FrontendRequest) -> None:
+        """切换插件启用状态并热生效。
+
+        写入 settings.enabled_plugins 后，对现存会话做外科手术式热切换：
+        browser-use 插件——注册/注销 12 个 browser_* 工具并创建/关闭
+        BrowserManager；技能列表天然随下一次系统提示词重建生效
+        （load_skill_registry 每次重扫插件）。最后推送新资源快照。
+        """
+        host = self._host
+        name = (request.setting_key or "").strip()  # 插件名（setting_key 复用）
+        enabled = bool(request.setting_value)
+        if not name:
+            return
+        settings = _load_settings()
+        settings.enabled_plugins[name] = enabled
+        _save_settings(settings)
+
+        if name == "browser-use":
+            for bundle in host._workspace_bundles():
+                try:
+                    await self._hot_toggle_browser_tools(bundle, enabled)
+                except Exception:
+                    log.exception("热切换 browser-use 工具失败: cwd=%s", bundle.cwd)
+
+        # 推送新资源快照（插件/技能列表即时刷新）
+        try:
+            resource_bundle = host._active_bundle() or host._bundle
+            if resource_bundle is not None:
+                await self._push_resources(resource_bundle)
+        except Exception:
+            log.exception("推送插件切换后的资源快照失败")
+        await self._emit(BackendEvent(
+            type="web_setting_changed",
+            setting_key="plugin_toggle",
+            setting_value={"name": name, "enabled": enabled},
+        ))
+
+    async def _hot_toggle_browser_tools(self, bundle: RuntimeBundle, enabled: bool) -> None:
+        """对单个 bundle 注册/注销浏览器工具并管理 BrowserManager 生命周期。"""
+        from illusion_forge.browser import BrowserConfig, BrowserManager
+        from illusion_forge.tools.browser_tools import create_browser_tools
+
+        registry = bundle.tool_registry
+        engine = bundle.engine
+        settings = bundle.current_settings()
+        if enabled:
+            if getattr(bundle, "browser_manager", None) is None:
+                bundle.browser_manager = BrowserManager(BrowserConfig(
+                    kernel=settings.browser.kernel,
+                    headless=settings.browser.headless,
+                    viewport_width=settings.browser.viewport_width,
+                    viewport_height=settings.browser.viewport_height,
+                    proxy=settings.browser.proxy,
+                ))
+            bundle.browser_manager.on_state_change = self._host._emit_browser_state
+            bundle.browser_manager.on_frame = self._host._emit_browser_frame
+            engine._tool_metadata["browser_manager"] = bundle.browser_manager
+            existing = {t.name for t in registry.list_tools()}
+            for tool in create_browser_tools():
+                if tool.name not in existing:
+                    registry.register(tool)
+        else:
+            manager = getattr(bundle, "browser_manager", None)
+            if manager is not None:
+                await manager.aclose()
+            bundle.browser_manager = None
+            engine._tool_metadata.pop("browser_manager", None)
+            for tool in create_browser_tools():
+                registry.unregister(tool.name)
+
+def _collect_resources(bundle: RuntimeBundle) -> dict[str, Any]:
+    """收集右侧栏资源快照（skills/agents/plugins/rules/mcp_servers）。
+
+    直接调用各注册表/管理器的结构化接口，废弃旧的命令文本正则解析
+    （_parseSkillsResult / _parsePluginsResult / _parseRulesResult）。
+
+    Args:
+        bundle: 运行时 bundle
+
+    Returns:
+        dict[str, Any]: {skills, agents, plugins, rules, mcp_servers} 结构化快照
+    """
+    # skills：从技能注册表读取结构化数据
+    from illusion_forge.skills.loader import load_skill_registry
+    skill_registry = load_skill_registry(bundle.cwd)
+    skills = [
+        {"name": s.name, "description": s.description or "", "source": s.source}
+        for s in skill_registry.list_skills()
+    ]
+
+    # agents：内置 + 用户级 + 项目级（随 bundle.cwd）+ 插件的合并视图
+    agents = []
+    try:
+        from illusion_forge.coordinator.agent_definitions import get_all_agent_definitions
+        for agent in get_all_agent_definitions(cwd=bundle.cwd):
+            agents.append({
+                "name": agent.name,
+                "description": agent.description or "",
+                "source": agent.source,
+                "color": agent.color,
+                "model": agent.model,
+                "background": agent.background,
+            })
+    except Exception:
+        log.exception("收集代理快照失败")
+
+    # plugins：从当前可见插件读取（复用 bundle.current_plugins）
+    plugins = []
+    try:
+        for plugin in bundle.current_plugins():
+            manifest = getattr(plugin, "manifest", None)
+            name = getattr(manifest, "name", "") if manifest else ""
+            description = getattr(manifest, "description", "") if manifest else ""
+            plugins.append({
+                "name": name,
+                "description": description,
+                "enabled": bool(getattr(plugin, "enabled", False)),
+                "skill_count": 0,
+                "mcp_count": 0,
+                "command_count": 0,
+            })
+    except Exception:
+        log.exception("收集插件快照失败")
+
+    # rules：从项目规则目录读取，过滤被权限禁用的规则
+    rules = []
+    try:
+        from illusion_forge.permissions.loader import (
+            filter_rules_by_permissions,
+            is_rules_disabled,
+            load_project_permissions,
+        )
+        from illusion_forge.skills.loader import get_project_rules_dir
+        project_permissions = load_project_permissions(bundle.cwd)
+        if not is_rules_disabled(project_permissions):
+            rules_dir = get_project_rules_dir(bundle.cwd)
+            if rules_dir.exists():
+                rule_files = filter_rules_by_permissions(
+                    sorted(rules_dir.glob("*.md")), project_permissions
+                )
+                for path in rule_files:
+                    rules.append({"name": path.stem, "source": "project"})
+    except Exception:
+        log.exception("收集规则快照失败")
+
+    # mcp_servers：复用 mcp_manager 的连接状态
+    mcp_servers = []
+    try:
+        for server in bundle.mcp_manager.list_statuses():
+            mcp_servers.append({
+                "name": server.name,
+                "state": server.state,
+                "tool_count": len(server.tools) if hasattr(server, "tools") else 0,
+            })
+    except Exception:
+        log.exception("收集 MCP 服务器快照失败")
+
+    return {"skills": skills, "agents": agents, "plugins": plugins, "rules": rules, "mcp_servers": mcp_servers}
+
+
+# ---------------------------------------------------------------------------
+# 右栏扩展纯函数辅助：文件树过滤 / Git 解析 / 文件预览
+# （独立于 dispatcher，便于单元测试）
+# ---------------------------------------------------------------------------
+
+# 单层目录条目上限（超出截断，前端显示省略行）
+_TREE_MAX_ENTRIES = 500
+# 文件预览限制
+_PREVIEW_MAX_BYTES = 512 * 1024
+_PREVIEW_MAX_LINES = 4000
+# git 子进程超时（秒）
+_GIT_TIMEOUT = 5.0
+
+
+def _resolve_within_root(root: str, rel: str) -> Path | None:
+    """将相对路径解析到 root 内的绝对路径，越界/穿越返回 None。
+
+    Args:
+        root: 工作区根目录（绝对路径）
+        rel: 工作区内相对路径（空串表示根；支持 / 或 \\ 分隔）
+
+    Returns:
+        Path | None: 解析后的绝对路径；超出 root 或解析失败返回 None
+    """
+    try:
+        root_path = Path(root).resolve()
+        target = (root_path / rel).resolve() if rel else root_path
+        target.relative_to(root_path)
+    except (OSError, ValueError):
+        return None
+    return target
+
+
+def _list_dir_entries(directory: Path, root: str) -> tuple[list[dict[str, Any]], bool]:
+    """列出目录一层的可见条目（目录优先，名称不区分大小写排序）。
+
+    Args:
+        directory: 目标目录（绝对路径）
+        root: 工作区根目录（条目 path 字段以根为基准的相对路径，/ 分隔）
+
+    Returns:
+        tuple[list[dict[str, Any]], bool]: (条目列表, 是否因超过上限截断)；
+        条目为 {name, path, kind: dir|file, size: 文件字节数}
+    """
+    entries: list[dict[str, Any]] = []
+    truncated = False
+    try:
+        with os.scandir(directory) as it:
+            for e in it:
+                try:
+                    is_dir = e.is_dir(follow_symlinks=False)
+                except OSError:
+                    continue
+                if not _tree_entry_visible(e.name, is_dir):
+                    continue
+                if len(entries) >= _TREE_MAX_ENTRIES:
+                    truncated = True
+                    break
+                try:
+                    rel = os.path.relpath(e.path, root).replace("\\", "/")
+                except ValueError:
+                    continue
+                entry: dict[str, Any] = {"name": e.name, "path": rel, "kind": "dir" if is_dir else "file"}
+                if not is_dir:
+                    try:
+                        entry["size"] = e.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        entry["size"] = 0
+                entries.append(entry)
+    except OSError:
+        return [], False
+    entries.sort(key=lambda x: (x["kind"] != "dir", x["name"].lower()))
+    return entries, truncated
+
+
+def _run_git(cwd: str, *args: str, ok_codes: tuple[int, ...] = (0,)) -> str | None:
+    """在工作区目录执行 git 子命令，成功返回 stdout，失败/超时返回 None。
+
+    Args:
+        cwd: 工作区目录
+        *args: git 子命令参数
+        ok_codes: 视为成功的退出码集合（如 --no-index 有差异时退出码为 1）
+
+    Returns:
+        str | None: stdout 原文（含换行）；退出码不在 ok_codes、git 缺失或超时返回 None
+    """
+    try:
+        # 非零退出码（如无上游/空仓库）由调用方按返回值降级，无需抛异常
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_GIT_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return proc.stdout if proc.returncode in ok_codes else None
+
+
+# porcelain 状态字母 → 展示状态
+_GIT_STATUS_MAP = {
+    "A": "added",
+    "M": "modified",
+    "D": "deleted",
+    "R": "renamed",
+    "C": "modified",
+    "T": "modified",
+    "U": "unmerged",
+    "?": "untracked",
+}
+
+
+def _parse_git_porcelain(raw: str) -> list[dict[str, Any]]:
+    """解析 ``git status --porcelain=v1 -z -uall`` 输出。
+
+    -z 模式条目以 NUL 分隔（路径内空格/引号不转义）；R/C 条目
+    后跟一条原始路径记录。XY 双字母：X=暂存区，Y=工作区。
+
+    Args:
+        raw: porcelain -z 原始输出
+
+    Returns:
+        list[dict[str, Any]]: [{path, status, staged, orig_path?, insertions, deletions}]
+    """
+    files: list[dict[str, Any]] = []
+    fields = [f for f in raw.split("\0") if f]
+    i = 0
+    while i < len(fields):
+        field = fields[i]
+        i += 1
+        if len(field) < 4:
+            continue
+        xy, path = field[:2], field[3:]
+        orig: str | None = None
+        if xy[0] in ("R", "C") and i < len(fields):
+            orig = fields[i]
+            i += 1
+        x, y = xy[0], xy[1]
+        letter = x if x not in (" ", "?", "!") else y
+        files.append({
+            "path": path,
+            "status": _GIT_STATUS_MAP.get(letter, "modified"),
+            "staged": x not in (" ", "?", "!"),
+            "orig_path": orig,
+            "insertions": None,
+            "deletions": None,
+        })
+    return files
+
+
+def _parse_git_numstat(raw: str) -> dict[str, tuple[int | None, int | None]]:
+    """解析 ``git diff --numstat -z`` 输出为 路径 → (增行, 删行) 映射。
+
+    二进制文件的增删为 "-"（映射为 None）；重命名条目附带的原始路径
+    记录无制表符分隔结构，自然跳过。
+
+    Args:
+        raw: numstat -z 原始输出
+
+    Returns:
+        dict[str, tuple[int | None, int | None]]: 路径 → (insertions, deletions)
+    """
+    result: dict[str, tuple[int | None, int | None]] = {}
+    for field in raw.split("\0"):
+        if not field:
+            continue
+        parts = field.split("\t")
+        if len(parts) != 3:
+            continue
+        added_s, deleted_s, path = parts
+        result[path] = (
+            int(added_s) if added_s.isdigit() else None,
+            int(deleted_s) if deleted_s.isdigit() else None,
+        )
+    return result
 
 
 async def _run_command_via_registry(line: str, bundle: RuntimeBundle) -> CommandResult | None:
