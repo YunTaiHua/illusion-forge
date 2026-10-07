@@ -2466,12 +2466,50 @@ class WebApiDispatcher:
         settings.enabled_plugins[name] = enabled
         _save_settings(settings)
 
+        handled_engines: set[int] = set()
+        new_hook_by_cwd: dict[str, Any] = {}
+        for ws_bundle in host._workspace_bundles():
+            try:
+                if name == "browser-use":
+                    # 工作区 bundle（管理器生命周期 + bundle 原引擎）+ 全部活会话引擎：
+                    # build_session_engine 对 tool_metadata 做了创建时快照拷贝，只更新
+                    # bundle 原引擎的话，用户正在对话的会话引擎拿到的仍是旧元数据
+                    # （browser_manager 缺失 → 工具调用报"插件未启用"）
+                    await self._hot_toggle_browser_tools(ws_bundle, enabled)
+                    handled_engines.add(id(ws_bundle.engine))
+                # 插件钩子热生效（所有插件）：重建 bundle 级 HookExecutor
+                self._rebuild_hook_executor(ws_bundle)
+                new_hook_by_cwd[str(ws_bundle.cwd)] = ws_bundle.hook_executor
+            except Exception:
+                log.exception("热切换插件失败: cwd=%s", ws_bundle.cwd)
         if name == "browser-use":
-            for bundle in host._workspace_bundles():
+            # 会话级 bundle 是工作区 bundle 的浅拷贝（browser_manager /
+            # hook_executor 是创建那一刻的引用快照）：逐会话把新管理器/
+            # 新执行器回绑，并补齐会话引擎的元数据快照，否则该会话永远
+            # 拿不到 browser_manager（工具调用报"插件未启用"）
+            managers_by_cwd = {
+                str(b.cwd): getattr(b, "browser_manager", None)
+                for b in host._workspace_bundles()
+            }
+            for session in getattr(host, "_sessions", {}).values():
+                engine = getattr(session, "engine", None)
+                s_bundle = getattr(session, "bundle", None)
+                if engine is None or s_bundle is None or id(engine) in handled_engines:
+                    continue
                 try:
-                    await self._hot_toggle_browser_tools(bundle, enabled)
+                    manager = managers_by_cwd.get(str(s_bundle.cwd)) or next(
+                        (m for m in managers_by_cwd.values() if m is not None), None)
+                    self._apply_browser_toggle(
+                        engine, s_bundle.tool_registry, manager, enabled)
+                    handled_engines.add(id(engine))
+                    if enabled and getattr(s_bundle, "browser_manager", None) is None:
+                        s_bundle.browser_manager = manager
+                    new_hook = new_hook_by_cwd.get(str(s_bundle.cwd))
+                    if new_hook is not None:
+                        s_bundle.hook_executor = new_hook
                 except Exception:
-                    log.exception("热切换 browser-use 工具失败: cwd=%s", bundle.cwd)
+                    log.exception("热切换 browser-use 会话引擎失败: sid=%s",
+                                  getattr(session, "session_id", "?"))
 
         # 推送新资源快照（插件/技能列表即时刷新）
         try:
@@ -2486,13 +2524,14 @@ class WebApiDispatcher:
             setting_value={"name": name, "enabled": enabled},
         ))
 
-    async def _hot_toggle_browser_tools(self, bundle: RuntimeBundle, enabled: bool) -> None:
-        """对单个 bundle 注册/注销浏览器工具并管理 BrowserManager 生命周期。"""
-        from illusion_forge.browser import BrowserConfig, BrowserManager
-        from illusion_forge.tools.browser_tools import create_browser_tools
+    async def _hot_toggle_browser_tools(self, bundle: RuntimeBundle, enabled: bool) -> Any:
+        """对单个 bundle 注册/注销浏览器工具并管理 BrowserManager 生命周期。
 
-        registry = bundle.tool_registry
-        engine = bundle.engine
+        Returns:
+            Any: 切换后的 BrowserManager（关闭时为 None）。
+        """
+        from illusion_forge.browser import BrowserConfig, BrowserManager
+
         settings = bundle.current_settings()
         if enabled:
             if getattr(bundle, "browser_manager", None) is None:
@@ -2505,320 +2544,44 @@ class WebApiDispatcher:
                 ))
             bundle.browser_manager.on_state_change = self._host._emit_browser_state
             bundle.browser_manager.on_frame = self._host._emit_browser_frame
-            engine._tool_metadata["browser_manager"] = bundle.browser_manager
-            existing = {t.name for t in registry.list_tools()}
-            for tool in create_browser_tools():
-                if tool.name not in existing:
-                    registry.register(tool)
-        else:
-            manager = getattr(bundle, "browser_manager", None)
-            if manager is not None:
-                await manager.aclose()
-            bundle.browser_manager = None
-            engine._tool_metadata.pop("browser_manager", None)
-            for tool in create_browser_tools():
-                registry.unregister(tool.name)
-
-def _collect_resources(bundle: RuntimeBundle) -> dict[str, Any]:
-    """收集右侧栏资源快照（skills/agents/plugins/rules/mcp_servers）。
-
-    直接调用各注册表/管理器的结构化接口，废弃旧的命令文本正则解析
-    （_parseSkillsResult / _parsePluginsResult / _parseRulesResult）。
-
-    Args:
-        bundle: 运行时 bundle
-
-    Returns:
-        dict[str, Any]: {skills, agents, plugins, rules, mcp_servers} 结构化快照
-    """
-    # skills：从技能注册表读取结构化数据
-    from illusion_forge.skills.loader import load_skill_registry
-    skill_registry = load_skill_registry(bundle.cwd)
-    skills = [
-        {"name": s.name, "description": s.description or "", "source": s.source}
-        for s in skill_registry.list_skills()
-    ]
-
-    # agents：内置 + 用户级 + 项目级（随 bundle.cwd）+ 插件的合并视图
-    agents = []
-    try:
-        from illusion_forge.coordinator.agent_definitions import get_all_agent_definitions
-        for agent in get_all_agent_definitions(cwd=bundle.cwd):
-            agents.append({
-                "name": agent.name,
-                "description": agent.description or "",
-                "source": agent.source,
-                "color": agent.color,
-                "model": agent.model,
-                "background": agent.background,
-            })
-    except Exception:
-        log.exception("收集代理快照失败")
-
-    # plugins：从当前可见插件读取（复用 bundle.current_plugins）
-    plugins = []
-    try:
-        for plugin in bundle.current_plugins():
-            manifest = getattr(plugin, "manifest", None)
-            name = getattr(manifest, "name", "") if manifest else ""
-            description = getattr(manifest, "description", "") if manifest else ""
-            plugins.append({
-                "name": name,
-                "description": description,
-                "enabled": bool(getattr(plugin, "enabled", False)),
-                "skill_count": 0,
-                "mcp_count": 0,
-                "command_count": 0,
-            })
-    except Exception:
-        log.exception("收集插件快照失败")
-
-    # rules：从项目规则目录读取，过滤被权限禁用的规则
-    rules = []
-    try:
-        from illusion_forge.permissions.loader import (
-            filter_rules_by_permissions,
-            is_rules_disabled,
-            load_project_permissions,
-        )
-        from illusion_forge.skills.loader import get_project_rules_dir
-        project_permissions = load_project_permissions(bundle.cwd)
-        if not is_rules_disabled(project_permissions):
-            rules_dir = get_project_rules_dir(bundle.cwd)
-            if rules_dir.exists():
-                rule_files = filter_rules_by_permissions(
-                    sorted(rules_dir.glob("*.md")), project_permissions
-                )
-                for path in rule_files:
-                    rules.append({"name": path.stem, "source": "project"})
-    except Exception:
-        log.exception("收集规则快照失败")
-
-    # mcp_servers：复用 mcp_manager 的连接状态
-    mcp_servers = []
-    try:
-        for server in bundle.mcp_manager.list_statuses():
-            mcp_servers.append({
-                "name": server.name,
-                "state": server.state,
-                "tool_count": len(server.tools) if hasattr(server, "tools") else 0,
-            })
-    except Exception:
-        log.exception("收集 MCP 服务器快照失败")
-
-    return {"skills": skills, "agents": agents, "plugins": plugins, "rules": rules, "mcp_servers": mcp_servers}
-
-
-# ---------------------------------------------------------------------------
-# 右栏扩展纯函数辅助：文件树过滤 / Git 解析 / 文件预览
-# （独立于 dispatcher，便于单元测试）
-# ---------------------------------------------------------------------------
-
-# 单层目录条目上限（超出截断，前端显示省略行）
-_TREE_MAX_ENTRIES = 500
-# 文件预览限制
-_PREVIEW_MAX_BYTES = 512 * 1024
-_PREVIEW_MAX_LINES = 4000
-# git 子进程超时（秒）
-_GIT_TIMEOUT = 5.0
-
-
-def _resolve_within_root(root: str, rel: str) -> Path | None:
-    """将相对路径解析到 root 内的绝对路径，越界/穿越返回 None。
-
-    Args:
-        root: 工作区根目录（绝对路径）
-        rel: 工作区内相对路径（空串表示根；支持 / 或 \\ 分隔）
-
-    Returns:
-        Path | None: 解析后的绝对路径；超出 root 或解析失败返回 None
-    """
-    try:
-        root_path = Path(root).resolve()
-        target = (root_path / rel).resolve() if rel else root_path
-        target.relative_to(root_path)
-    except (OSError, ValueError):
+            self._apply_browser_toggle(
+                bundle.engine, bundle.tool_registry, bundle.browser_manager, enabled)
+            return bundle.browser_manager
+        manager = getattr(bundle, "browser_manager", None)
+        if manager is not None:
+            await manager.aclose()
+        bundle.browser_manager = None
+        self._apply_browser_toggle(bundle.engine, bundle.tool_registry, None, enabled)
         return None
-    return target
 
+    def _apply_browser_toggle(self, engine: Any, registry: Any,
+                              manager: Any, enabled: bool) -> None:
+        """把浏览器工具注册/注销 + browser_manager 元数据落到一个引擎。"""
+        from illusion_forge.tools.browser_tools import apply_browser_toggle
 
-def _list_dir_entries(directory: Path, root: str) -> tuple[list[dict[str, Any]], bool]:
-    """列出目录一层的可见条目（目录优先，名称不区分大小写排序）。
+        apply_browser_toggle(engine, registry, manager, enabled)
 
-    Args:
-        directory: 目标目录（绝对路径）
-        root: 工作区根目录（条目 path 字段以根为基准的相对路径，/ 分隔）
+    def _rebuild_hook_executor(self, bundle: RuntimeBundle) -> None:
+        """按最新设置/插件重建 bundle 级钩子执行器（插件热切换的 hooks 部分）。
 
-    Returns:
-        tuple[list[dict[str, Any]], bool]: (条目列表, 是否因超过上限截断)；
-        条目为 {name, path, kind: dir|file, size: 文件字节数}
-    """
-    entries: list[dict[str, Any]] = []
-    truncated = False
-    try:
-        with os.scandir(directory) as it:
-            for e in it:
-                try:
-                    is_dir = e.is_dir(follow_symlinks=False)
-                except OSError:
-                    continue
-                if not _tree_entry_visible(e.name, is_dir):
-                    continue
-                if len(entries) >= _TREE_MAX_ENTRIES:
-                    truncated = True
-                    break
-                try:
-                    rel = os.path.relpath(e.path, root).replace("\\", "/")
-                except ValueError:
-                    continue
-                entry: dict[str, Any] = {"name": e.name, "path": rel, "kind": "dir" if is_dir else "file"}
-                if not is_dir:
-                    try:
-                        entry["size"] = e.stat(follow_symlinks=False).st_size
-                    except OSError:
-                        entry["size"] = 0
-                entries.append(entry)
-    except OSError:
-        return [], False
-    entries.sort(key=lambda x: (x["kind"] != "dir", x["name"].lower()))
-    return entries, truncated
+        会话运行时共享 bundle.hook_executor，重建即覆盖所有会话；
+        session_hook_store 原样保留（会话级钩子状态不丢）。
+        """
+        from illusion_forge.hooks import HookExecutionContext, HookExecutor
+        from illusion_forge.hooks.loader import load_hook_registry
+        from illusion_forge.plugins.loader import load_plugins
 
-
-def _run_git(cwd: str, *args: str, ok_codes: tuple[int, ...] = (0,)) -> str | None:
-    """在工作区目录执行 git 子命令，成功返回 stdout，失败/超时返回 None。
-
-    Args:
-        cwd: 工作区目录
-        *args: git 子命令参数
-        ok_codes: 视为成功的退出码集合（如 --no-index 有差异时退出码为 1）
-
-    Returns:
-        str | None: stdout 原文（含换行）；退出码不在 ok_codes、git 缺失或超时返回 None
-    """
-    try:
-        # 非零退出码（如无上游/空仓库）由调用方按返回值降级，无需抛异常
-        proc = subprocess.run(
-            ["git", *args],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=_GIT_TIMEOUT,
-            check=False,
+        settings = bundle.current_settings()
+        previous = bundle.hook_executor
+        bundle.hook_executor = HookExecutor(
+            load_hook_registry(settings, load_plugins(settings, bundle.cwd)),
+            HookExecutionContext(
+                cwd=Path(bundle.cwd).resolve(),
+                api_client=bundle.api_client,
+                default_model=settings.active_model_name,
+            ),
+            session_hook_store=previous._session_hook_store,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return proc.stdout if proc.returncode in ok_codes else None
-
-
-# porcelain 状态字母 → 展示状态
-_GIT_STATUS_MAP = {
-    "A": "added",
-    "M": "modified",
-    "D": "deleted",
-    "R": "renamed",
-    "C": "modified",
-    "T": "modified",
-    "U": "unmerged",
-    "?": "untracked",
-}
-
-
-def _parse_git_porcelain(raw: str) -> list[dict[str, Any]]:
-    """解析 ``git status --porcelain=v1 -z -uall`` 输出。
-
-    -z 模式条目以 NUL 分隔（路径内空格/引号不转义）；R/C 条目
-    后跟一条原始路径记录。XY 双字母：X=暂存区，Y=工作区。
-
-    Args:
-        raw: porcelain -z 原始输出
-
-    Returns:
-        list[dict[str, Any]]: [{path, status, staged, orig_path?, insertions, deletions}]
-    """
-    files: list[dict[str, Any]] = []
-    fields = [f for f in raw.split("\0") if f]
-    i = 0
-    while i < len(fields):
-        field = fields[i]
-        i += 1
-        if len(field) < 4:
-            continue
-        xy, path = field[:2], field[3:]
-        orig: str | None = None
-        if xy[0] in ("R", "C") and i < len(fields):
-            orig = fields[i]
-            i += 1
-        x, y = xy[0], xy[1]
-        letter = x if x not in (" ", "?", "!") else y
-        files.append({
-            "path": path,
-            "status": _GIT_STATUS_MAP.get(letter, "modified"),
-            "staged": x not in (" ", "?", "!"),
-            "orig_path": orig,
-            "insertions": None,
-            "deletions": None,
-        })
-    return files
-
-
-def _parse_git_numstat(raw: str) -> dict[str, tuple[int | None, int | None]]:
-    """解析 ``git diff --numstat -z`` 输出为 路径 → (增行, 删行) 映射。
-
-    二进制文件的增删为 "-"（映射为 None）；重命名条目附带的原始路径
-    记录无制表符分隔结构，自然跳过。
-
-    Args:
-        raw: numstat -z 原始输出
-
-    Returns:
-        dict[str, tuple[int | None, int | None]]: 路径 → (insertions, deletions)
-    """
-    result: dict[str, tuple[int | None, int | None]] = {}
-    for field in raw.split("\0"):
-        if not field:
-            continue
-        parts = field.split("\t")
-        if len(parts) != 3:
-            continue
-        added_s, deleted_s, path = parts
-        result[path] = (
-            int(added_s) if added_s.isdigit() else None,
-            int(deleted_s) if deleted_s.isdigit() else None,
-        )
-    return result
-
-
-async def _run_command_via_registry(line: str, bundle: RuntimeBundle) -> CommandResult | None:
-    """通过 CommandRegistry 执行命令并返回结果（不经过 handle_line）。
-
-    B 通道（web_query）的执行型/查询型指令复用此函数，避免触发
-    transcript_item/hook reload 等 terminal 副作用。
-
-    Args:
-        line: 完整命令行（如 "/compact"）
-        bundle: 运行时 bundle
-
-    Returns:
-        CommandResult | None: 命令结果，None 表示命令未识别或已通过其他机制处理
-    """
-    registry = create_default_command_registry()
-    parsed = registry.lookup(line)
-    if parsed is None:
-        return None
-    command, args = parsed
-    context = CommandContext(
-        engine=bundle.engine,
-        hooks_summary=bundle.hook_summary(),
-        mcp_summary=bundle.mcp_summary(),
-        plugin_summary=bundle.plugin_summary(),
-        cwd=bundle.cwd,
-        tool_registry=bundle.tool_registry,
-        app_state=bundle.app_state,
-        session_id=bundle.session_id,
-    )
-    return await command.handler(args, context)
 
 
 def _collect_resources(bundle: RuntimeBundle) -> dict[str, Any]:
@@ -3457,3 +3220,34 @@ def _find_solidworks_window() -> int:
         return matches[0] if matches else 0
     except Exception:  # noqa: BLE001 - 窗口枚举探测，失败即视为未找到
         return 0
+
+
+async def _run_command_via_registry(line: str, bundle: RuntimeBundle) -> CommandResult | None:
+    """通过 CommandRegistry 执行命令并返回结果（不经过 handle_line）。
+
+    B 通道（web_query）的执行型/查询型指令复用此函数，避免触发
+    transcript_item/hook reload 等 terminal 副作用。
+
+    Args:
+        line: 完整命令行（如 "/compact"）
+        bundle: 运行时 bundle
+
+    Returns:
+        CommandResult | None: 命令结果，None 表示命令未识别或已通过其他机制处理
+    """
+    registry = create_default_command_registry()
+    parsed = registry.lookup(line)
+    if parsed is None:
+        return None
+    command, args = parsed
+    context = CommandContext(
+        engine=bundle.engine,
+        hooks_summary=bundle.hook_summary(),
+        mcp_summary=bundle.mcp_summary(),
+        plugin_summary=bundle.plugin_summary(),
+        cwd=bundle.cwd,
+        tool_registry=bundle.tool_registry,
+        app_state=bundle.app_state,
+        session_id=bundle.session_id,
+    )
+    return await command.handler(args, context)
